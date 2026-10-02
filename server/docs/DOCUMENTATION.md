@@ -356,6 +356,7 @@ Client-side the same list lives in `client/src/utils/formValidation.js`. The two
 | `location` | String | required |
 | `startDate`, `endDate` | Date | required |
 | `registrationEnabled` | Boolean | default `true` |
+| `showOnSite` | Boolean | default `true`; `false` keeps the activity off the public site |
 | `coverImage`, `coverImagePublicId` | String | Cloudinary URL + deletion handle |
 
 ### `forms`
@@ -1302,6 +1303,7 @@ Creates an activity **and** automatically generates its registration form. Rich-
 | `startDate` | date | ➖ | default: now |
 | `endDate` | date | ➖ | default: now + 7 days |
 | `registrationEnabled` | boolean | ➖ | |
+| `showOnSite` | boolean | ➖ | default `true`; `false` creates it unpublished |
 | `coverImage` | **file** | ➖ | image binary |
 | `fields` | JSON array | ➖ | custom form fields; defaults to Name+Email |
 | `maxSubmissions` | number | ➖ | capacity cap for the generated form |
@@ -1336,7 +1338,8 @@ fields:       [{"label":"Full Name","type":"TextInput","required":true},
     "startDate": "2026-10-05T09:00:00.000Z",
     "endDate": "2026-10-05T16:00:00.000Z",
     "coverImage": "https://res.cloudinary.com/demo/image/upload/v1/activities/xyz.jpg",
-    "registrationEnabled": true
+    "registrationEnabled": true,
+    "showOnSite": true
   },
   "form": {
     "_id": "67d0a1b2c3d4e5f6a7b8c9d1",
@@ -1363,6 +1366,30 @@ Paginated public feed; each item carries a computed registration `status` and it
 
 - **Auth:** No (public)
 
+> **Publication.** Activities with `showOnSite: false` are excluded from this endpoint, from
+> `GET /api/activities/featured`, and from `GET /api/activities/:id` (which answers `404` for
+> them, so a hidden activity cannot be opened by guessing its id). This applies to **every**
+> public surface — the events page, the home page featured carousel, event details and event
+> registration — and none of them can opt out.
+>
+> The dashboard reads these same endpoints, so it asks for drafts explicitly with
+> `?includeHidden=true`. **Both** conditions must hold for that to do anything: the request must
+> carry the flag *and* a valid token for a **`VIEW_ROLES`** account (`board` or `xcom`). The flag
+> alone is worthless from outside, so a draft cannot be reached by guessing a URL.
+>
+> It has to be page-driven rather than identity-driven. The session cookie is sent on every
+> request, public pages included, so keying this off the role alone would let a board member
+> signed into the dashboard see unpublished activities on the public events page in the same
+> browser — precisely what `showOnSite` exists to prevent. `board` is in `VIEW_ROLES`
+> deliberately: it is the read-only oversight role, so it must be able to review a draft before
+> it goes live. Only `xcom` can *change* the flag.
+>
+> The filter is `{ showOnSite: true }` — strict equality, not `$ne: false`. Anything not
+> explicitly published stays off the public site, so a document that lost the field disappears
+> rather than being shown by accident. **Run `node server/scripts/backfill-activity-show-on-site.js`
+> before deploying this**, or every activity created before the field existed will vanish from
+> the public pages.
+
 **Success Response — `200 OK`**
 
 ```json
@@ -1383,6 +1410,7 @@ Paginated public feed; each item carries a computed registration `status` and it
       "createdAt": "2026-08-10T12:00:00.000Z",
       "coverImage": "https://res.cloudinary.com/...jpg",
       "registrationEnabled": true,
+      "showOnSite": true,
       "status": "Active",
       "formID": "67d0a1b2c3d4e5f6a7b8c9d1"
     }
@@ -1404,11 +1432,23 @@ Paginated public feed; each item carries a computed registration `status` and it
 
 **Error Responses** — `404 { "message": "Activity not found" }`
 
+Returned both for an id that does not exist and for an activity whose `showOnSite` is not `true`.
+The second case answers `404` rather than `403` on purpose: `403` would confirm that a hidden
+activity exists at that id, which is the thing the flag is there to prevent. The dashboard's edit
+modal passes `?includeHidden=true` to reach a draft; `EventDetails` and `EventRegistration` do not.
+
 ### 3.4.4 Update Activity
 
 `PUT /api/activities/:id`
 
 Partial update; accepts a new `coverImage` (old one deleted from Cloudinary first). Sending `coverImage: ""` removes the existing cover.
+
+> **Partial, not a merge.** `req.body` is applied to the document as-is, so any key you omit is
+> left untouched — but any key you send is overwritten, including with `""`. Sending only
+> `{ "showOnSite": false }` is therefore the correct way to publish or unpublish without
+> disturbing the rest of the activity, and a full form post is the way to replace the rest. Do not
+> route a partial edit through the client's `buildPayload`: it fills absent keys with `""`, so a
+> one-field payload built that way will blank the title and content.
 
 - **Auth:** Yes - roles: `xcom`
 - **Headers:** `multipart/form-data` (or JSON for text-only edits)
@@ -1418,6 +1458,12 @@ Partial update; accepts a new `coverImage` (old one deleted from Cloudinary firs
 
 ```json
 { "title": "IEEE Day 2026 — Extended", "location": "Hall B" }
+```
+
+**Request Example (publishing only)**
+
+```json
+{ "showOnSite": false }
 ```
 
 **Success Response — `200 OK`**
