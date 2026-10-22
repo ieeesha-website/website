@@ -53,7 +53,7 @@ const getFooterCard = () => {
               width: 100%;
               max-width: 600px;
               background-color: #ffffff;
-              border-top: 3px solid #00629b;
+              border-top: 3px solid #017cd0;
             "
           >
 
@@ -104,7 +104,7 @@ const getFooterCard = () => {
                         style="
                           margin-top: 3px;
                           margin-bottom: 12px;
-                          color: #00629b;
+                          color: #017cd0;
                           font-size: 10px;
                           line-height: 15px;
                           font-weight: 700;
@@ -147,7 +147,7 @@ const getFooterCard = () => {
                               white-space: nowrap;
                             "
                           >
-                            Ziad Elsayed
+                            Alaa Mohamed
                           </td>
                         </tr>
 
@@ -163,7 +163,7 @@ const getFooterCard = () => {
                               white-space: nowrap;
                             "
                           >
-                            Vice-Chairperson
+                            Tech Vice-Chairperson
                           </td>
 
                           <td
@@ -177,6 +177,33 @@ const getFooterCard = () => {
                             "
                           >
                             Lojine Wael
+                          </td>
+                        </tr>
+                         
+                        <tr>
+                          <td
+                            style="
+                              padding: 3px 0;
+                              color: #667482;
+                              font-size: 11px;
+                              line-height: 17px;
+                              white-space: nowrap;
+                            "
+                          >
+                            Non-Tech Vice-Chairperson
+                          </td>
+
+                          <td
+                            style="
+                              padding: 3px 0 3px 35px;
+                              color: #1f2933;
+                              font-size: 11px;
+                              line-height: 17px;
+                              font-weight: 700;
+                              white-space: nowrap;
+                            "
+                          >
+                            Malek Mokhtar
                           </td>
                         </tr>
 
@@ -337,7 +364,7 @@ const getFooterCard = () => {
                       <a
                         href="mailto:ieee.sha.hr@gmail.com"
                         style="
-                          color: #00629b;
+                          color: #017cd0;
                           text-decoration: none;
                         "
                       >
@@ -355,7 +382,7 @@ const getFooterCard = () => {
                       <a
                         href="mailto:ieee.sha.10@gmail.com"
                         style="
-                          color: #00629b;
+                          color: #017cd0;
                           text-decoration: none;
                         "
                       >
@@ -401,7 +428,7 @@ const getFooterCard = () => {
                   href="https://www.facebook.com/IEEE.ElShoroukAcademy.SB/"
                   target="_blank"
                   style="
-                    color: #00629b;
+                    color: #017cd0;
                     text-decoration: none;
                     font-size: 11px;
                     line-height: 16px;
@@ -427,7 +454,7 @@ const getFooterCard = () => {
                   href="https://www.linkedin.com/company/ieee-el-shorouk-academy-student-branch"
                   target="_blank"
                   style="
-                    color: #00629b;
+                    color: #017cd0;
                     text-decoration: none;
                     font-size: 11px;
                     line-height: 16px;
@@ -453,7 +480,7 @@ const getFooterCard = () => {
                   href="https://www.instagram.com/ieee.sha.sb/"
                   target="_blank"
                   style="
-                    color: #00629b;
+                    color: #017cd0;
                     text-decoration: none;
                     font-size: 11px;
                     line-height: 16px;
@@ -477,7 +504,7 @@ const getFooterCard = () => {
 
 // Palette shared by every card so the content and the footer read as one design.
 const PAGE_BG = '#f7f9fb';
-const BRAND = '#00629b';
+const BRAND = '#017cd0';
 const INK = '#1f2933';
 const MUTED = '#667482';
 
@@ -491,7 +518,7 @@ const CARD_OPEN = `<table
               width: 100%;
               max-width: 600px;
               background-color: #ffffff;
-              border-top: 3px solid ${BRAND};
+              border-top: 0;
             "
           >`;
 
@@ -499,41 +526,30 @@ const CARD_CLOSE = `</table>`;
 
 // The blue brand bar that tops every card. Injected by the shell so all emails
 // share one copy and cannot drift apart.
+
 const getBrandBar = () => `
-            <!-- ==================== BRAND BAR ==================== -->
-            <tr>
-              <td
-                align="center"
-                style="
-                  padding: 20px 25px;
-                  background-color: ${BRAND};
-                "
-              >
-                <div
-                  style="
-                    color: #ffffff;
-                    font-size: 15px;
-                    line-height: 21px;
-                    font-weight: 700;
-                    letter-spacing: 0.5px;
-                  "
-                >
-                  IEEE El Shorouk Academy
-                </div>
-                <div
-                  style="
-                    margin-top: 3px;
-                    color: #bfe0f5;
-                    font-size: 10px;
-                    line-height: 15px;
-                    font-weight: 700;
-                    letter-spacing: 2px;
-                  "
-                >
-                  STUDENT BRANCH
-                </div>
-              </td>
-            </tr>`;
+  <!-- ==================== BRAND BAR ==================== -->
+  <tr>
+    <td
+      align="center"
+      style="padding: 0; margin: 0;"
+    >
+      <img
+        src="https://res.cloudinary.com/otvxv2ll/image/upload/v1792691550/IEEE_Email_Header.png"
+        alt="IEEE El Shorouk Academy Student Branch"
+        width="100%"
+        style="
+          display: block;
+          width: 100%;
+          height: auto;
+          border: 0;
+          margin: 0;
+          padding: 0;
+        "
+      />
+    </td>
+  </tr>`;
+
 
 // True when the content's own outer table is already a finished brand card.
 // Checking the FIRST table only: a bulk body that merely contains some nested
