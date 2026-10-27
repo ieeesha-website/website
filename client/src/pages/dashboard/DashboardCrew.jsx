@@ -8,6 +8,9 @@ import {
   CalendarRange,
   Star,
   ExternalLink,
+  GripVertical,
+  ChevronUp,
+  ChevronDown,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import api from "../../utils/api";
@@ -96,6 +99,7 @@ export default function DashboardCrew() {
     addMember,
     updateMember,
     removeMember,
+    reorderMembers,
   } = useCrewForSeason(selectedId);
 
   // --- member form state ---
@@ -114,6 +118,69 @@ export default function DashboardCrew() {
   const [seasonBusy, setSeasonBusy] = useState(false);
 
   const membersBySection = { excom, counselor, board };
+
+  // --- drag & drop / reordering state ---
+  const [draggedItem, setDraggedItem] = useState(null); // { sectionKey, index }
+  const [dropTarget, setDropTarget] = useState(null); // { sectionKey, index }
+
+  const moveMember = async (sectionKey, index, direction) => {
+    const list = membersBySection[sectionKey] || [];
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= list.length) return;
+
+    const updated = [...list];
+    const [moved] = updated.splice(index, 1);
+    updated.splice(targetIndex, 0, moved);
+
+    try {
+      await reorderMembers(sectionKey, updated);
+      toast.success("Order updated", { id: "crew-order" });
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Failed to update order");
+    }
+  };
+
+  const handleDragStart = (e, sectionKey, index) => {
+    setDraggedItem({ sectionKey, index });
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", `${sectionKey}:${index}`);
+  };
+
+  const handleDragOver = (e, sectionKey, index) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (!draggedItem || draggedItem.sectionKey !== sectionKey) return;
+    if (dropTarget?.sectionKey !== sectionKey || dropTarget?.index !== index) {
+      setDropTarget({ sectionKey, index });
+    }
+  };
+
+  const handleDrop = async (e, sectionKey, targetIndex) => {
+    e.preventDefault();
+    setDropTarget(null);
+    if (!draggedItem) return;
+    const { sectionKey: sourceSection, index: sourceIndex } = draggedItem;
+    setDraggedItem(null);
+
+    if (sourceSection !== sectionKey || sourceIndex === targetIndex) return;
+
+    const list = membersBySection[sectionKey] || [];
+    const updated = [...list];
+    const [moved] = updated.splice(sourceIndex, 1);
+    updated.splice(targetIndex, 0, moved);
+
+    try {
+      await reorderMembers(sectionKey, updated);
+      toast.success("Order updated", { id: "crew-order" });
+    } catch (err) {
+      toast.error(err.response?.data?.message || "Failed to update order");
+    }
+  };
+
+  const handleDragEnd = () => {
+    setDraggedItem(null);
+    setDropTarget(null);
+  };
 
   const openCreateModal = (section) => {
     setForm({ name: "", position: "", image: "", bio: "", socials: emptySocials() });
@@ -233,71 +300,143 @@ export default function DashboardCrew() {
     }
   };
 
-  const renderMemberCard = (member) => (
-    <div
-      key={member._id}
-      className="bg-white dark:bg-[#1a1f2e] rounded-xl border border-gray-100 dark:border-[#222936] p-5 flex flex-col justify-between"
-    >
-      <div className="flex items-start gap-4">
-        {member.image ? (
-          <img
-            src={member.image}
-            alt={member.name}
-            className="w-16 h-16 rounded-full object-cover bg-gray-100"
-          />
-        ) : (
-          <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-xl">
-            {member.name?.[0] || "?"}
-          </div>
-        )}
-        <div className="min-w-0">
-          <h2 className="text-foreground font-semibold text-lg leading-snug">
-            {member.name}
-          </h2>
-          <p className="text-primary text-sm font-medium">{member.position}</p>
-          {SOCIAL_FIELDS.some((f) => member.socials?.[f.key]) && (
-            <div className="flex flex-wrap gap-1.5 mt-2">
-              {SOCIAL_FIELDS.filter((f) => member.socials?.[f.key]).map((f) => (
-                <a
-                  key={f.key}
-                  href={
-                    f.key === "email"
-                      ? `mailto:${member.socials[f.key]}`
-                      : member.socials[f.key]
-                  }
-                  target={f.key === "email" ? undefined : "_blank"}
-                  rel="noreferrer"
-                  title={f.label}
-                  className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-primary px-1.5 py-0.5 rounded bg-gray-50 dark:bg-gray-700/40"
+  const renderMemberCard = (member, index, total, sectionKey) => {
+    const isDragging = draggedItem?.sectionKey === sectionKey && draggedItem?.index === index;
+    const isOver = dropTarget?.sectionKey === sectionKey && dropTarget?.index === index && !isDragging;
+
+    return (
+      <div
+        key={member._id}
+        draggable={canEdit && total > 1}
+        onDragStart={(e) => handleDragStart(e, sectionKey, index)}
+        onDragOver={(e) => handleDragOver(e, sectionKey, index)}
+        onDrop={(e) => handleDrop(e, sectionKey, index)}
+        onDragEnd={handleDragEnd}
+        className={`bg-white dark:bg-[#1a1f2e] rounded-xl border p-5 flex flex-col justify-between transition-all duration-200 select-none ${
+          isDragging
+            ? "opacity-30 scale-95 border-dashed border-primary ring-2 ring-primary/20"
+            : isOver
+            ? "border-primary ring-2 ring-primary/50 shadow-lg scale-[1.02]"
+            : "border-gray-100 dark:border-[#222936]"
+        }`}
+      >
+        <div>
+          {/* Header row with reordering controls */}
+          <div className="flex items-center justify-between mb-3.5 pb-2.5 border-b border-gray-100 dark:border-[#222936]">
+            <div className="flex items-center gap-1.5">
+              {canEdit && total > 1 && (
+                <div
+                  className="cursor-grab active:cursor-grabbing text-muted hover:text-primary p-0.5 rounded transition-colors"
+                  title="Drag to reorder"
                 >
-                  <ExternalLink size={10} /> {f.label}
-                </a>
-              ))}
+                  <GripVertical size={16} />
+                </div>
+              )}
+              <span className="inline-flex items-center justify-center font-mono font-bold text-xs px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-foreground/80">
+                #{index + 1}
+              </span>
             </div>
+
+            {canEdit && total > 1 && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  disabled={index === 0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    moveMember(sectionKey, index, -1);
+                  }}
+                  title="Move earlier"
+                  className="p-1 rounded text-muted hover:text-foreground hover:bg-gray-100 dark:hover:bg-gray-700/60 disabled:opacity-25 disabled:cursor-not-allowed disabled:hover:bg-transparent transition-colors"
+                >
+                  <ChevronUp size={16} />
+                </button>
+                <button
+                  type="button"
+                  disabled={index === total - 1}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    moveMember(sectionKey, index, 1);
+                  }}
+                  title="Move later"
+                  className="p-1 rounded text-muted hover:text-foreground hover:bg-gray-100 dark:hover:bg-gray-700/60 disabled:opacity-25 disabled:cursor-not-allowed disabled:hover:bg-transparent transition-colors"
+                >
+                  <ChevronDown size={16} />
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-start gap-4">
+            {member.image ? (
+              <img
+                src={member.image}
+                alt={member.name}
+                className="w-16 h-16 rounded-full object-cover bg-gray-100 shrink-0"
+              />
+            ) : (
+              <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold text-xl shrink-0">
+                {member.name?.[0] || "?"}
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <h2 className="text-foreground font-semibold text-lg leading-snug truncate">
+                {member.name}
+              </h2>
+              <p className="text-primary text-sm font-medium truncate">{member.position}</p>
+              {SOCIAL_FIELDS.some((f) => member.socials?.[f.key]) && (
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {SOCIAL_FIELDS.filter((f) => member.socials?.[f.key]).map((f) => (
+                    <a
+                      key={f.key}
+                      href={
+                        f.key === "email"
+                          ? `mailto:${member.socials[f.key]}`
+                          : member.socials[f.key]
+                      }
+                      target={f.key === "email" ? undefined : "_blank"}
+                      rel="noreferrer"
+                      title={f.label}
+                      onClick={(e) => e.stopPropagation()}
+                      className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-primary px-1.5 py-0.5 rounded bg-gray-50 dark:bg-gray-700/40"
+                    >
+                      <ExternalLink size={10} /> {f.label}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 pt-4 border-t border-gray-100 dark:border-[#222936] flex justify-end gap-2">
+          {/* Board can read the crew list; changing it is xcom-only. */}
+          {canEdit && (
+            <>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openEditModal(member);
+                }}
+                className="text-xs font-medium text-muted hover:text-foreground hover:bg-gray-50 dark:hover:bg-gray-700/50 px-3 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1.5"
+              >
+                <Edit size={13} /> Edit
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDeleting(member);
+                }}
+                className="text-xs font-medium text-red-500 hover:text-red-600 bg-red-50 hover:bg-red-100 dark:hover:bg-red-900/20 dark:hover:bg-red-900/40 px-3 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1.5"
+              >
+                <Trash2 size={13} /> Delete
+              </button>
+            </>
           )}
         </div>
       </div>
-      <div className="mt-4 pt-4 border-t border-gray-100 dark:border-[#222936] flex justify-end gap-2">
-        {/* Board can read the crew list; changing it is xcom-only. */}
-        {canEdit && (
-          <>
-            <button
-              onClick={() => openEditModal(member)}
-              className="text-xs font-medium text-muted hover:text-foreground hover:bg-gray-50 dark:hover:bg-gray-700/50 px-3 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1.5"
-            >
-              <Edit size={13} /> Edit
-            </button>
-            <button
-              onClick={() => setDeleting(member)}
-              className="text-xs font-medium text-red-500 hover:text-red-600 bg-red-50 hover:bg-red-100 dark:hover:bg-red-900/20 dark:hover:bg-red-900/40 px-3 py-1.5 rounded-lg transition-colors inline-flex items-center gap-1.5"
-            >
-              <Trash2 size={13} /> Delete
-            </button>
-          </>
-        )}
-      </div>
-    </div>
-  );
+    );
+  };
 
   const renderEmptyState = (sectionLabel) => (
     <div className="flex flex-col items-center justify-center py-10 bg-white dark:bg-[#1a1f2e] rounded-xl border border-dashed border-gray-200 dark:border-[#222936]">
@@ -396,7 +535,14 @@ export default function DashboardCrew() {
                 <section key={section.key} className="space-y-3">
                   <div className="flex items-center justify-between gap-4">
                     <div>
-                      <h2 className="text-base font-bold text-foreground">{section.label}</h2>
+                      <div className="flex items-center gap-2.5">
+                        <h2 className="text-base font-bold text-foreground">{section.label}</h2>
+                        {members.length > 1 && canEdit && (
+                          <span className="text-[11px] font-medium text-muted bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full">
+                            Drag cards or use arrows to reorder
+                          </span>
+                        )}
+                      </div>
                       <p className="text-xs text-muted mt-0.5">{section.blurb}</p>
                     </div>
                     {canEdit && (
@@ -410,7 +556,9 @@ export default function DashboardCrew() {
                   </div>
                   {members.length > 0 ? (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {members.map(renderMemberCard)}
+                      {members.map((member, idx) =>
+                        renderMemberCard(member, idx, members.length, section.key)
+                      )}
                     </div>
                   ) : (
                     renderEmptyState(section.label)
