@@ -8,6 +8,7 @@ const {
   getAllCrew,
   updateCrew,
   deleteCrew,
+  reorderCrew,
 } = require('../controllers/crewController');
 
 crewRouter.get('/', getAllCrew);
@@ -16,6 +17,9 @@ crewRouter.get('/', getAllCrew);
 // guard is repeated per route rather than applied with router.use(), which would
 // only cover routes registered after it.
 crewRouter.post('/', protect, authorize(...WRITE_ROLES), createCrew);
+
+// Reorder MUST be registered before /:id so Express does not match "reorder" as an id.
+crewRouter.put('/reorder', protect, authorize(...WRITE_ROLES), reorderCrew);
 
 crewRouter.put('/:id', protect, authorize(...WRITE_ROLES), updateCrew);
 

@@ -68,7 +68,16 @@ const createCrew = catchAsync(async (req, res) => {
   const section = assertSection(req.body?.section);
   const socials = sanitizeSocials(req.body?.socials, AppError);
 
-  const crew = await Crew.create({ ...input, season, section, socials });
+  let order = Number.isFinite(req.body?.order) ? Number(req.body.order) : null;
+  if (order === null) {
+    const highest = await Crew.findOne({ season, section })
+      .sort({ order: -1, createdAt: -1 })
+      .select("order")
+      .lean();
+    order = highest && Number.isFinite(highest.order) ? highest.order + 1 : 0;
+  }
+
+  const crew = await Crew.create({ ...input, order, season, section, socials });
 
   res.status(201).json({
     success: true,
@@ -181,10 +190,55 @@ const deleteCrew = catchAsync(async (req, res) => {
   });
 });
 
+// @desc REORDER crew members
+// @route PUT /api/crew/reorder
+const reorderCrew = catchAsync(async (req, res) => {
+  const { orderedIds, items } = req.body;
+
+  let updates = [];
+
+  if (Array.isArray(orderedIds) && orderedIds.length > 0) {
+    updates = orderedIds.map((id, index) => ({
+      id,
+      order: index,
+    }));
+  } else if (Array.isArray(items) && items.length > 0) {
+    updates = items.map((item, index) => ({
+      id: item.id || item._id,
+      order: Number.isFinite(item.order) ? Number(item.order) : index,
+    }));
+  } else {
+    throw new AppError("Invalid payload: orderedIds or items array is required", 400);
+  }
+
+  for (const update of updates) {
+    if (!isObjectId(update.id)) {
+      throw new AppError(`Invalid crew member id: ${update.id}`, 400);
+    }
+  }
+
+  const bulkOps = updates.map(({ id, order }) => ({
+    updateOne: {
+      filter: { _id: id },
+      update: { $set: { order } },
+    },
+  }));
+
+  if (bulkOps.length > 0) {
+    await Crew.bulkWrite(bulkOps);
+  }
+
+  res.status(200).json({
+    success: true,
+    message: "Crew order updated successfully",
+  });
+});
+
 module.exports = {
   createCrew,
   getAllCrew,
   updateCrew,
   deleteCrew,
+  reorderCrew,
   SECTIONS,
 };
