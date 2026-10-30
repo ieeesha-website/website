@@ -1,4 +1,4 @@
-import React, { useState, useCallback, Fragment } from 'react';
+import React, { useState, useCallback, Fragment, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronLeft, ChevronRight, Download, Loader2, Trash2 } from 'lucide-react';
 // Hooks & data
 import { useAuth } from '../../context/AuthContext';
@@ -11,6 +11,8 @@ import { useUpdateRole } from '../../hooks/dashboard/useUpdateRole';
 import { useChangeMemberCommittee } from '../../hooks/dashboard/useChangeMemberCommittee';
 import { useDeleteMember } from '../../hooks/auth/useDeleteMember';
 import { committees } from '../../data/committeesData';
+import api from '../../utils/api';
+import { YEAR_MAP } from '../../data/ordinalMap';
 // Components
 import Button from '../../components/ui/Button';
 import AdvancedSearch from '../../components/dashboard/AdvancedSearch';
@@ -37,6 +39,7 @@ export default function DashboardMembers() {
     page,
     setPage,
     totalPages,
+    totalCount,
     loading: membersLoading,
     resetFilters,
     hasActiveFilters,
@@ -47,6 +50,8 @@ export default function DashboardMembers() {
   const [expandedId, setExpandedId] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [memberCommittees, setMemberCommittees] = useState({});
+  const [loadingAllIds, setLoadingAllIds] = useState(false);
+  const selectAllCheckboxRef = useRef(null);
   
   const { keyword, setKeyword, results, setResults, isLoading: searchLoading } = useSearchMembers();
   const isSearching = keyword.trim().length >= 2;
@@ -56,17 +61,11 @@ export default function DashboardMembers() {
   const loading = isSearching ? searchLoading : membersLoading;
 
   const { updatingRole, updateRole } = useUpdateRole();
-  
   const { updatingCommittee, updateCommittee } = useChangeMemberCommittee();
-
   const { deleteMember, deleting } = useDeleteMember();
-  
   const { exporting, exportUsers } = useExportUsers();
 
-  // xcom only. Board reads this page but changes nothing on it.
   const canEdit = canWrite(user?.role);
-
-  // Deleting your own account is self-service, so it stays available to board.
   const canDelete = (member) => canEdit || member.id === user?._id;
 
   const handleDeleteConfirm = useCallback(async () => {
@@ -75,6 +74,7 @@ export default function DashboardMembers() {
     if (!deletedId) return;
     setMembers((prev) => prev.filter((m) => m.id !== deletedId));
     setResults((prev) => prev.filter((m) => m.id !== deletedId));
+    setSelectedIds((prev) => prev.filter((id) => id !== deletedId));
     if (deletedId === user?._id) {
       window.location.href = "/login";
       return;
@@ -87,6 +87,86 @@ export default function DashboardMembers() {
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
   };
+
+  // 1. تصفير التحديد عند تغيير أي فلتر أو كلمة البحث
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [activeColleges, activeYears, activeRoles, activePosition, keyword]);
+
+  // 2. دالة جلب كل الـ IDs من السيرفر بالاعتماد على الفلاتر النشطة
+  const fetchAllMemberIds = useCallback(async () => {
+    try {
+      const params = new URLSearchParams();
+      params.set("allIds", "true");
+      if (isSearching && keyword.trim()) {
+        params.set("search", keyword.trim());
+      }
+      if (activeRoles.length > 0) {
+        params.set("role", activeRoles.join(","));
+      }
+      if (activeColleges.length > 0) {
+        params.set("college", activeColleges.join(","));
+      }
+      if (activeYears.length > 0) {
+        params.set(
+          "yearOfStudy",
+          activeYears.map((y) => YEAR_MAP[y] ?? y).join(","),
+        );
+      }
+      if (activePosition) {
+        params.set("position", activePosition);
+      }
+
+      const res = await api.get(`/users/all?${params.toString()}`);
+      return (res.data?.ids || []).map(String);
+    } catch (err) {
+      console.error("Failed to fetch all member IDs:", err);
+      return [];
+    }
+  }, [
+    isSearching,
+    keyword,
+    activeRoles,
+    activeColleges,
+    activeYears,
+    activePosition,
+  ]);
+
+  const totalAvailable = isSearching ? displayMembers.length : totalCount;
+
+  // 3. تحديد هل الكل محدد أم جزء فقط
+  const isAllSelected =
+    totalAvailable > 0 &&
+    selectedIds.length >= totalAvailable &&
+    displayMembers.every((m) => selectedIds.includes(m.id));
+
+  const isIndeterminate =
+    !isAllSelected && selectedIds.length > 0;
+
+  // 4. تفعيل حالة الـ dash (-) عند التحديد الجزئي
+  useEffect(() => {
+    if (selectAllCheckboxRef.current) {
+      selectAllCheckboxRef.current.indeterminate = isIndeterminate;
+    }
+  }, [isIndeterminate]);
+
+  // 5. زرار Select All: يحدد كل الأعضاء أو يلغي تحديدهم
+  const handleSelectAllToggle = useCallback(async () => {
+    if (isAllSelected) {
+      setSelectedIds([]);
+      return;
+    }
+
+    setLoadingAllIds(true);
+    try {
+      const allIds = await fetchAllMemberIds();
+      setSelectedIds(allIds);
+    } catch (err) {
+      console.error("Failed to select all members:", err);
+    } finally {
+      setLoadingAllIds(false);
+    }
+  }, [isAllSelected, fetchAllMemberIds]);
 
   const handleRoleChange = useCallback(
     (memberId, newRole) => {
@@ -200,7 +280,6 @@ export default function DashboardMembers() {
             >
               Reset Filters
             </Button>
-            
           </div>
         </div>
       </div>
@@ -211,26 +290,24 @@ export default function DashboardMembers() {
             <thead className="bg-[#F8FAFC] dark:bg-[#202636]">
               <tr className="*:text-left *:text-xs *:font-semibold *:text-muted *:uppercase *:tracking-wide *:py-3">
                 <th className="px-2 w-10">
-                  <input
-                    type="checkbox"
-                    aria-label="Select all members"
-                    checked={
-                      displayMembers.length > 0 &&
-                      displayMembers.every((m) => selectedIds.includes(m.id))
-                    }
-                    onChange={() =>
-                      displayMembers.every((m) => selectedIds.includes(m.id))
-                        ? setSelectedIds((prev) =>
-                            prev.filter(
-                              (id) => !displayMembers.some((m) => m.id === id),
-                            ),
-                          )
-                        : setSelectedIds((prev) => [
-                            ...new Set([...prev, ...displayMembers.map((m) => m.id)]),
-                          ])
-                    }
-                    className="ml-3 w-4 h-4 accent-primary cursor-pointer"
-                  />
+                  <div className="flex items-center">
+                    {loadingAllIds ? (
+                      <Loader2
+                        size={16}
+                        className="ml-3 animate-spin text-primary"
+                      />
+                    ) : (
+                      <input
+                        ref={selectAllCheckboxRef}
+                        type="checkbox"
+                        aria-label="Select all members"
+                        checked={isAllSelected}
+                        disabled={loading || totalAvailable === 0}
+                        onChange={handleSelectAllToggle}
+                        className="ml-3 w-4 h-4 accent-primary cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                      />
+                    )}
+                  </div>
                 </th>
                 <th className="px-6 w-[30%]">MEMBER</th>
                 <th className="px-4 w-[15%]">COLLEGE/ORG</th>
@@ -244,10 +321,7 @@ export default function DashboardMembers() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td
-                    colSpan={8}
-                    className="text-sm text-muted py-16 text-center"
-                  >
+                  <td colSpan={8} className="text-sm text-muted py-16 text-center">
                     <div className="flex items-center justify-center gap-2">
                       <Loader2 size={18} className="animate-spin" />
                       {isSearching ? "Searching..." : "Loading members..."}
@@ -256,10 +330,7 @@ export default function DashboardMembers() {
                 </tr>
               ) : displayMembers.length === 0 ? (
                 <tr>
-                  <td
-                    colSpan={8}
-                    className="text-sm text-muted py-16 text-center"
-                  >
+                  <td colSpan={8} className="text-sm text-muted py-16 text-center">
                     {isSearching
                       ? `No results found for "${keyword}"`
                       : "No members match your filters."}
@@ -268,182 +339,179 @@ export default function DashboardMembers() {
               ) : (
                 displayMembers.map((member) => (
                   <Fragment key={member.id}>
-                  <tr
-                    className="last:border-0 hover:bg-muted/5 transition-colors"
-                  >
-                    <td className="py-3 px-2">
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${member.name}`}
-                        checked={selectedIds.includes(member.id)}
-                        onChange={() => toggleSelect(member.id)}
-                        className="ml-3 w-4 h-4 accent-primary cursor-pointer"
-                      />
-                    </td>
-                    <td className="py-3 px-6">
-                      <div className="flex items-center gap-3">
-                        <div
-                          className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold text-white flex-shrink-0 ${member.avatarColor}`}
-                        >
-                          {member.initials}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-sm font-medium text-foreground">
-                              {member.name}
-                            </span>
-                            {member.position === "professional" ? (
-                              <span className="text-[10px] font-semibold text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-500/10 px-1.5 py-0.5 rounded-full">
-                                Professional
-                              </span>
-                            ) : member.position === "student" ? (
-                              <span className="text-[10px] font-semibold text-teal-700 bg-teal-50 dark:text-teal-300 dark:bg-teal-500/10 px-1.5 py-0.5 rounded-full">
-                                Student
-                              </span>
-                            ) : null}
-                            {member.id === user?._id && (
-                              <span className="text-[10px] font-semibold text-primary bg-primary/10 px-1.5 py-0.5 rounded-full">
-                                You
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-xs text-muted truncate">
-                            {member.email}
-                          </p>
-                        </div>
-                        {member.position === "professional" && (
-                          <button
-                            onClick={() =>
-                              setExpandedId(
-                                expandedId === member.id ? null : member.id,
-                              )
-                            }
-                            className="shrink-0 p-1 text-muted hover:text-primary rounded-lg transition-colors"
-                            title={
-                              expandedId === member.id
-                                ? "Hide details"
-                                : "Show details"
-                            }
+                    <tr className="last:border-0 hover:bg-muted/5 transition-colors">
+                      <td className="py-3 px-2">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${member.name}`}
+                          checked={selectedIds.includes(member.id)}
+                          onChange={() => toggleSelect(member.id)}
+                          className="ml-3 w-4 h-4 accent-primary cursor-pointer"
+                        />
+                      </td>
+                      <td className="py-3 px-6">
+                        <div className="flex items-center gap-3">
+                          <div
+                            className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold text-white flex-shrink-0 ${member.avatarColor}`}
                           >
-                            <ChevronDown
-                              size={16}
-                              className={`transition-transform ${
-                                expandedId === member.id ? "rotate-180" : ""
-                              }`}
-                            />
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                    <td className="py-3 px-4 text-sm text-muted">
-                      {member.position === "professional"
-                        ? member.organization || "N/A"
-                        : member.college}
-                    </td>
-                    <td className="py-3 px-4">
-                      {canEdit ? (
-                        <select
-                          value={memberRoles[member.id] ?? member.role}
-                          onChange={(e) =>
-                            handleRoleChange(member.id, e.target.value)
-                          }
-                          disabled={updatingRole === member.id}
-                          aria-label={`Role for ${member.name}`}
-                          className="text-xs font-medium bg-card-alt border border-border rounded-lg px-2.5 py-1.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {roleFilters.map((r) => (
-                            <option key={r} value={r}>
-                              {ROLE_LABELS[r] || r}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span className="text-xs font-medium text-foreground">
-                          {ROLE_LABELS[memberRoles[member.id] ?? member.role] ||
-                            member.role}
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-sm text-muted">
-                      {member.position === "professional"
-                        ? member.yearsOfExperience != null
-                          ? `${member.yearsOfExperience} yr`
-                          : "N/A"
-                        : member.year}
-                    </td>
-                    <td className="py-3 px-4">
-                      {canEdit ? (
-                        <select
-                          value={memberCommittees[member.id] ?? member.committee}
-                          onChange={(e) =>
-                            handleCommitteeChange(member.id, e.target.value)
-                          }
-                          disabled={updatingCommittee === member.id}
-                          aria-label={`Committee for ${member.name}`}
-                          className="text-xs font-medium bg-card-alt border border-border rounded-lg px-2.5 py-1.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          <option value="">None</option>
-                          {committees.map((c) => (
-                            <option key={c.id} value={c.label}>
-                              {c.label}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span className="text-sm text-muted">
-                          {member.committee || "None"}
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-3 px-4">
-                      {member.status === "Verified" ? (
-                        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-700 bg-green-50 px-2.5 py-1 rounded-full">
-                          <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                          Verified
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 bg-amber-50 px-2.5 py-1 rounded-full">
-                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-                          Unverified
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-center">
-                      {canDelete(member) && (
-                        <button
-                          onClick={() => setDeleteTarget(member)}
-                          title="Delete user"
-                          className="p-2 text-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                  {expandedId === member.id && member.position === "professional" && (
-                    <tr className="bg-muted/5 border-b border-border/60">
-                      <td colSpan={8} className="px-6 py-4">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                          {[
-                            { label: "Organization", value: member.organization },
-                            { label: "Role in Organization", value: member.roleInOrganization },
-                            {
-                              label: "Years of Experience",
-                              value: member.yearsOfExperience != null ? String(member.yearsOfExperience) : "",
-                            },
-                            { label: "Reason for Registration", value: member.reasonForRegistration },
-                          ].map((item) => (
-                            <div key={item.label}>
-                              <p className="text-[10px] font-semibold text-muted uppercase tracking-wide mb-1">
-                                {item.label}
-                              </p>
-                              <p className="text-sm text-foreground">{item.value || "—"}</p>
+                            {member.initials}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-sm font-medium text-foreground">
+                                {member.name}
+                              </span>
+                              {member.position === "professional" ? (
+                                <span className="text-[10px] font-semibold text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-500/10 px-1.5 py-0.5 rounded-full">
+                                  Professional
+                                </span>
+                              ) : member.position === "student" ? (
+                                <span className="text-[10px] font-semibold text-teal-700 bg-teal-50 dark:text-teal-300 dark:bg-teal-500/10 px-1.5 py-0.5 rounded-full">
+                                  Student
+                                </span>
+                              ) : null}
+                              {member.id === user?._id && (
+                                <span className="text-[10px] font-semibold text-primary bg-primary/10 px-1.5 py-0.5 rounded-full">
+                                  You
+                                </span>
+                              )}
                             </div>
-                          ))}
+                            <p className="text-xs text-muted truncate">
+                              {member.email}
+                            </p>
+                          </div>
+                          {member.position === "professional" && (
+                            <button
+                              onClick={() =>
+                                setExpandedId(
+                                  expandedId === member.id ? null : member.id
+                                )
+                              }
+                              className="shrink-0 p-1 text-muted hover:text-primary rounded-lg transition-colors"
+                              title={
+                                expandedId === member.id
+                                  ? "Hide details"
+                                  : "Show details"
+                              }
+                            >
+                              <ChevronDown
+                                size={16}
+                                className={`transition-transform ${
+                                  expandedId === member.id ? "rotate-180" : ""
+                                }`}
+                              />
+                            </button>
+                          )}
                         </div>
                       </td>
+                      <td className="py-3 px-4 text-sm text-muted">
+                        {member.position === "professional"
+                          ? member.organization || "N/A"
+                          : member.college}
+                      </td>
+                      <td className="py-3 px-4">
+                        {canEdit ? (
+                          <select
+                            value={memberRoles[member.id] ?? member.role}
+                            onChange={(e) =>
+                              handleRoleChange(member.id, e.target.value)
+                            }
+                            disabled={updatingRole === member.id}
+                            aria-label={`Role for ${member.name}`}
+                            className="text-xs font-medium bg-card-alt border border-border rounded-lg px-2.5 py-1.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {roleFilters.map((r) => (
+                              <option key={r} value={r}>
+                                {ROLE_LABELS[r] || r}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="text-xs font-medium text-foreground">
+                            {ROLE_LABELS[memberRoles[member.id] ?? member.role] || member.role}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-sm text-muted">
+                        {member.position === "professional"
+                          ? member.yearsOfExperience != null
+                            ? `${member.yearsOfExperience} yr`
+                            : "N/A"
+                          : member.year}
+                      </td>
+                      <td className="py-3 px-4">
+                        {canEdit ? (
+                          <select
+                            value={memberCommittees[member.id] ?? member.committee}
+                            onChange={(e) =>
+                              handleCommitteeChange(member.id, e.target.value)
+                            }
+                            disabled={updatingCommittee === member.id}
+                            aria-label={`Committee for ${member.name}`}
+                            className="text-xs font-medium bg-card-alt border border-border rounded-lg px-2.5 py-1.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            <option value="">None</option>
+                            {committees.map((c) => (
+                              <option key={c.id} value={c.label}>
+                                {c.label}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="text-sm text-muted">
+                            {member.committee || "None"}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
+                        {member.status === "Verified" ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-green-700 bg-green-50 px-2.5 py-1 rounded-full">
+                            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                            Verified
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 bg-amber-50 px-2.5 py-1 rounded-full">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                            Unverified
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        {canDelete(member) && (
+                          <button
+                            onClick={() => setDeleteTarget(member)}
+                            title="Delete user"
+                            className="p-2 text-muted hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
+                      </td>
                     </tr>
-                  )}
+                    {expandedId === member.id && member.position === "professional" && (
+                      <tr className="bg-muted/5 border-b border-border/60">
+                        <td colSpan={8} className="px-6 py-4">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                            {[
+                              { label: "Organization", value: member.organization },
+                              { label: "Role in Organization", value: member.roleInOrganization },
+                              {
+                                label: "Years of Experience",
+                                value: member.yearsOfExperience != null ? String(member.yearsOfExperience) : "",
+                              },
+                              { label: "Reason for Registration", value: member.reasonForRegistration },
+                            ].map((item) => (
+                              <div key={item.label}>
+                                <p className="text-[10px] font-semibold text-muted uppercase tracking-wide mb-1">
+                                  {item.label}
+                                </p>
+                                <p className="text-sm text-foreground">{item.value || "—"}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
                   </Fragment>
                 ))
               )}
