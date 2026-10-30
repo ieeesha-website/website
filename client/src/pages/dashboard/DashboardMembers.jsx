@@ -18,7 +18,7 @@ import MemberFilters from '../../components/dashboard/MemberFilters';
 import DeleteUserModal from '../../components/dashboard/DeleteUserModal';
 
 export default function DashboardMembers() {
-	const { user } = useAuth();
+  const { user } = useAuth();
   
   const {
     members,
@@ -46,7 +46,7 @@ export default function DashboardMembers() {
   const [memberRoles, setMemberRoles] = useState({});
   const [expandedId, setExpandedId] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
-	const [memberCommittees, setMemberCommittees] = useState({});
+  const [memberCommittees, setMemberCommittees] = useState({});
   
   const { keyword, setKeyword, results, setResults, isLoading: searchLoading } = useSearchMembers();
   const isSearching = keyword.trim().length >= 2;
@@ -55,11 +55,11 @@ export default function DashboardMembers() {
     : members;
   const loading = isSearching ? searchLoading : membersLoading;
 
-	const { updatingRole, updateRole } = useUpdateRole();
+  const { updatingRole, updateRole } = useUpdateRole();
   
-	const { updatingCommittee, updateCommittee } = useChangeMemberCommittee();
+  const { updatingCommittee, updateCommittee } = useChangeMemberCommittee();
 
-	const { deleteMember, deleting } = useDeleteMember();
+  const { deleteMember, deleting } = useDeleteMember();
   
   const { exporting, exportUsers } = useExportUsers();
 
@@ -186,8 +186,8 @@ export default function DashboardMembers() {
                 <Download size={16} />
               )}
               Export as Excel ({selectedIds.length})
-						</button>
-						
+            </button>
+            
             <Button
               variant='outline'
               onClick={resetFilters}
@@ -288,23 +288,28 @@ export default function DashboardMembers() {
                           {member.initials}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <span className="text-sm font-medium text-foreground">
-                            {member.name}
-                            {member.id === user?._id && (
-                              <span className="ml-1.5 text-[10px] font-semibold text-primary bg-primary/10 px-1.5 py-0.5 rounded-full">
-                                You
-                              </span>
-                            )}
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-sm font-medium text-foreground">
+                              {member.name}
+                            </span>
                             {member.position === "professional" ? (
-                              <span className="ml-1.5 text-[10px] font-semibold text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-500/10 px-1.5 py-0.5 rounded-full">
+                              <span className="text-[10px] font-semibold text-violet-700 bg-violet-50 dark:text-violet-300 dark:bg-violet-500/10 px-1.5 py-0.5 rounded-full">
                                 Professional
                               </span>
                             ) : member.position === "student" ? (
-                              <span className="ml-1.5 text-[10px] font-semibold text-teal-700 bg-teal-50 dark:text-teal-300 dark:bg-teal-500/10 px-1.5 py-0.5 rounded-full">
+                              <span className="text-[10px] font-semibold text-teal-700 bg-teal-50 dark:text-teal-300 dark:bg-teal-500/10 px-1.5 py-0.5 rounded-full">
                                 Student
                               </span>
                             ) : null}
-                          </span>
+                            {member.id === user?._id && (
+                              <span className="text-[10px] font-semibold text-primary bg-primary/10 px-1.5 py-0.5 rounded-full">
+                                You
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-muted truncate">
+                            {member.email}
+                          </p>
                         </div>
                         {member.position === "professional" && (
                           <button
@@ -471,7 +476,7 @@ export default function DashboardMembers() {
             </div>
           </div>
         )}
-			</div>
+      </div>
 
       <DeleteUserModal
         key={deleteTarget?.id ?? "closed"}
