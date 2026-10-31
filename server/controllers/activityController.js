@@ -176,10 +176,27 @@ const getActivities = catchAsync(async (req, res) => {
   // position. Lean keeps the reported value equal to the stored one, so the two
   // can never disagree.
 
-  let {date, startDate, endDate} = req.query;
+  let {date, startDate, endDate, year} = req.query;
   let dateFilter = {};
 
-  if (startDate && endDate) {
+  if (date) {
+    date = new Date(date);
+
+    if (Number.isNaN(date.getTime())) {
+      throw new AppError("Invalid date.", 400);
+    }
+
+    const dayStart = new Date(date);
+    dayStart.setHours(0, 0, 0, 0);
+
+    const dayEnd = new Date(date);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    dateFilter = {
+      startDate: {$lte: dayEnd},
+      endDate: {$gte: dayStart}
+    }
+  } else if (startDate && endDate) {
     startDate = new Date(startDate);
     endDate = new Date(endDate);
 
@@ -198,22 +215,27 @@ const getActivities = catchAsync(async (req, res) => {
       startDate: {$lte: endDate},
       endDate: {$gte: startDate}
     }
-  } else if (date) {
-    date = new Date(date);
-
-    if (Number.isNaN(date.getTime())) {
-      throw new AppError("Invalid date.", 400);
+  } else if (year) {
+    if (!/^\d{4}$/.test(year)) {
+      throw new AppError("Invalid year.", 400);
     }
 
-    const dayStart = new Date(date);
-    dayStart.setHours(0, 0, 0, 0);
+    year = Number(year);
 
-    const dayEnd = new Date(date);
-    dayEnd.setHours(23, 59, 59, 999);
+    if (
+        !Number.isInteger(year) ||
+        year < 1000 ||
+        year > 9999
+    ) {
+      throw new AppError("Invalid year.", 400);
+    }
+
+    const yearStart = new Date(year, 0, 1);
+    const yearEnd = new Date(year, 11, 31, 23, 59, 59, 999);
 
     dateFilter = {
-      startDate: {$lte: dayEnd},
-      endDate: {$gte: dayStart}
+      startDate: {$lte: yearEnd},
+      endDate: {$gte: yearStart}
     }
   }
 
