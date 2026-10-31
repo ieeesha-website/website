@@ -172,6 +172,36 @@ const getPaginatedEmails = async (req, res) => {
   }
 };
 
+// @desc    Delete multiple email logs by id
+// @route   POST /api/emails/logs/bulk-delete
+// @access  Private (XCom)
+const bulkDeleteEmailLogs = async (req, res) => {
+  try {
+    const { logIds } = req.body || {};
+
+    if (!Array.isArray(logIds) || logIds.length === 0) {
+      return res.status(400).json({ error: 'logIds must be a non-empty array' });
+    }
+
+    // Invalid and already-deleted ids are ignored on purpose: one stale row in
+    // the selection should not block the rest of the batch from being removed.
+    const ids = [...new Set(logIds)]
+      .filter((id) => typeof id === 'string' && mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    if (ids.length === 0) {
+      return res.status(200).json({ success: true, deletedCount: 0 });
+    }
+
+    const result = await EmailLog.deleteMany({ _id: { $in: ids } });
+
+    return res.status(200).json({ success: true, deletedCount: result.deletedCount });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: 'Failed to delete email logs' });
+  }
+};
+
 // @desc    Send Bulk Emails from Database to specific Users/Emails
 // @route   POST /api/emails/bulk-send-db
 // @access  Private (XCom/Board)
@@ -290,4 +320,4 @@ const sendBulkEmailsFromDB = async (req, res) => {
   }
 };
 
-module.exports = { sendBulkEmailsFromExcel, sendBulkEmailsFromDB, getPaginatedEmails, getEmailQuotaUsage };
+module.exports = { sendBulkEmailsFromExcel, sendBulkEmailsFromDB, getPaginatedEmails, getEmailQuotaUsage, bulkDeleteEmailLogs };
