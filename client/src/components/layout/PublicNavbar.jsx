@@ -127,7 +127,7 @@ const PublicNavbar = () => {
                 onClick={desktopToggle}
                 className="px-6 py-3 bg-linear-to-r from-primary-dark to-primary-light hover:from-primary-light hover:to-primary-dark text-white rounded-lg transition duration-600 shadow-lg font-light flex items-center gap-2"
               >
-                Join Noww
+                Join Now
                 <ChevronDown
                   size={16}
                   className={`transition-transform ${desktopMenuOpen ? "rotate-180" : ""}`}
