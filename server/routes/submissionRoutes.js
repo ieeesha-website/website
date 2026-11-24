@@ -6,6 +6,7 @@ const {
   getUserSubmission,
   getSubmissions,
   getSubmissionsForForm,
+  updateAttendance,
   editSubmission, 
   exportSubmissionsToExcel,
   downloadFile
@@ -24,10 +25,14 @@ submissionRouter.post('/', optionalProtect, upload.any(), submitForm);
 //    "member" is excluded: they have no dashboard at all.
 submissionRouter.post('/scan', protect, authorize(...SCAN_ROLES), scanTicket);
 
-// 3. View & Export — read-only for board.
+// 3. View, Export & attendance check-in from the table. Board may check people
+//    in here just as it may through /scan; every other action stays xcom-only.
 submissionRouter.get('/export/:formId', protect, authorize(...VIEW_ROLES), exportSubmissionsToExcel);
 submissionRouter.get('/form/:formId', protect, authorize(...VIEW_ROLES), getSubmissionsForForm);
 submissionRouter.get('/download', protect, authorize(...VIEW_ROLES), downloadFile);
+// Attendance toggle on the submissions table. Sits before the generic
+// /:userid/:formid lookup so the more specific path always wins.
+submissionRouter.put('/:id/attendance', protect, authorize(...VIEW_ROLES), updateAttendance);
 // "Have I already submitted this form?" — the caller's own submission, which is
 // why it lives in the public-facing form UI and only needs a session. Scoping
 // the :userid to the session stops it being an IDOR over everyone else's

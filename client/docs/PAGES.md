@@ -81,7 +81,7 @@ write, so showing a board member an empty page would be pointless.
 | `/dashboard/crew` | `dashboard/DashboardCrew` | ✅ | Season management (create / rename / **publish to home** / delete) + the Excom and Board of the selected season. Member CRUD with LinkedIn, Facebook, Collabatek, email and website (`useSeasons`, `useCrewForSeason`). `board` reads the lists |
 | `/dashboard/forms` | `dashboard/forms/DashboardForms` | ✅ | Forms list, filters, open/close/delete (`useForms`, `useToggleForm`, `useDeleteForm`). The open/close toggle is disabled for `board` |
 | `/dashboard/forms/create-form` | `dashboard/forms/CreateForm` | ✅ | **xcom only.** Form builder (`useCreateForm`) |
-| `/dashboard/forms/submissions/:formId` | `dashboard/forms/ShowFormSubmissions` | ✅ | Responses for a form (`useFormSubmissions`). Read-only, so `board` may use it |
+| `/dashboard/forms/submissions/:formId` | `dashboard/forms/ShowFormSubmissions` | ✅ | Responses for a form (`useFormSubmissions`), with search across names, emails, tickets and answers. Attendance badge toggles (`useToggleSubmissionAttendance`) and persists; `board` may use it, as on the scan page |
 | `/dashboard/email` | `dashboard/BulkMailer` | ✅ | **xcom only.** Compose + send broadcast emails. `board` reads the delivery history in Email Logs instead |
 | `/dashboard/email-logs` | `dashboard/EmailLogsPage` | ✅ | Delivery history (`useEmailLogs`) |
 | `/dashboard/settings` | `dashboard/DashboardSettings` | ✅ | Admin profile, site config, user permissions, backup. `board` reads; xcom writes |

@@ -3,6 +3,8 @@ import { useParams, useLocation, Link } from "react-router-dom";
 import { ArrowLeft, FileText, Loader2, ChevronDown, ChevronUp, Download, ExternalLink, ArrowDownUp, Check } from "lucide-react";
 import { useFormSubmissions } from "../../../hooks/dashboard/useGetSubmissions";
 import { useExportFormSubmissions } from "../../../hooks/dashboard/forms/useExportFormSubmissions";
+import { useToggleSubmissionAttendance } from "../../../hooks/dashboard/forms/useToggleSubmissionAttendance";
+import AdvancedSearch from "../../../components/dashboard/AdvancedSearch";
 import { composeOtherValue } from "../../../data/fieldTypes";
 
 function isFileUrl(value) {
@@ -38,7 +40,53 @@ function getAttachmentUrl(url) {
   return url;
 }
 
-function SubmissionRow({ submission, index, fieldLabelMap, fieldsById, tracksAttendance, columnCount }) {
+// One lower-case haystack per submission, built from everything a committee
+// might reasonably look a response up by. Answer labels are deliberately left
+// out: searching "email" should find people, not every form that asks for one.
+function searchableText(submission, fieldsById) {
+  const values = [
+    submission.userId?.name,
+    submission.userId?.email,
+    submission.registrantEmail,
+    submission.ticketCode,
+    submission.createdAt
+      ? new Date(submission.createdAt).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "",
+  ];
+
+  Object.entries(submission.answers || {}).forEach(([key, answer]) => {
+    const field = fieldsById?.[key];
+    values.push(
+      field ? composeOtherValue(field, answer, submission.otherAnswers) : answer
+    );
+  });
+  Object.values(submission.otherAnswers || {}).forEach((value) =>
+    values.push(value)
+  );
+
+  return values
+    .flat(Infinity)
+    .filter((value) => value !== null && value !== undefined)
+    .join(" ")
+    .toLowerCase();
+}
+
+function SubmissionRow({
+  submission,
+  index,
+  fieldLabelMap,
+  fieldsById,
+  tracksAttendance,
+  columnCount,
+  onToggleAttendance,
+  updating,
+}) {
   const [expanded, setExpanded] = useState(false);
 
   const name =
@@ -76,15 +124,23 @@ function SubmissionRow({ submission, index, fieldLabelMap, fieldsById, tracksAtt
         </td>
         {tracksAttendance && (
           <td className="px-4 py-3">
-            <span
-              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+            <button
+              type="button"
+              role="switch"
+              aria-checked={!!submission.attended}
+              aria-label={`Mark ${name} as ${submission.attended ? "not attended" : "attended"}`}
+              title={`Click to mark as ${submission.attended ? "Not Attended" : "Attended"}`}
+              onClick={() => onToggleAttendance(submission)}
+              disabled={updating}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold transition-all cursor-pointer hover:brightness-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-60 disabled:cursor-wait ${
                 submission.attended
                   ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
                   : "bg-gray-100 text-gray-600 dark:bg-gray-700/50 dark:text-gray-400"
               }`}
             >
+              {updating && <Loader2 size={11} className="animate-spin" />}
               {submission.attended ? "Attended" : "Not Attended"}
-            </span>
+            </button>
           </td>
         )}
         <td className="px-4 py-3 text-xs text-muted">{date}</td>
@@ -201,8 +257,11 @@ export default function ShowFormSubmissions() {
   // link, which used to leave every answer labelled with a raw field id.
   const location = useLocation();
 
-  const { submissions, total, form, isLoading, error } = useFormSubmissions(formId);
+  const { submissions, setSubmissions, total, form, isLoading, error } =
+    useFormSubmissions(formId);
   const { exporting, exportSubmissions } = useExportFormSubmissions();
+  const { toggleAttendance, updatingIds } =
+    useToggleSubmissionAttendance(setSubmissions);
 
   const formTitle = form?.title || "Form";
   // Only an `attendance` form mints a ticket, so only an `attendance` form can
@@ -237,6 +296,22 @@ export default function ShowFormSubmissions() {
         return sortOrder === "oldest" ? ta - tb : tb - ta;
       }),
     [submissions, sortOrder],
+  );
+
+  const [search, setSearch] = useState("");
+  const searchTerms = useMemo(
+    () => search.trim().toLowerCase().split(/\s+/).filter(Boolean),
+    [search],
+  );
+  const visibleSubmissions = useMemo(
+    () =>
+      searchTerms.length
+        ? sortedSubmissions.filter((submission) => {
+            const text = searchableText(submission, fieldsById);
+            return searchTerms.every((term) => text.includes(term));
+          })
+        : sortedSubmissions,
+    [sortedSubmissions, searchTerms, fieldsById],
   );
 
   const handleExport = () => exportSubmissions(formId, formTitle);
@@ -365,8 +440,26 @@ export default function ShowFormSubmissions() {
         </div>
       </div>
 
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <AdvancedSearch
+          value={search}
+          onChange={setSearch}
+          placeholder="Search by name, email, ticket or answer..."
+          className="sm:max-w-md"
+        />
+        {searchTerms.length > 0 && (
+          <p className="text-xs text-muted">
+            Showing{" "}
+            <span className="font-semibold text-foreground">
+              {visibleSubmissions.length}
+            </span>{" "}
+            of {total} {total === 1 ? "response" : "responses"}
+          </p>
+        )}
+      </div>
+
       <div className="bg-white dark:bg-[#1a1f2e] rounded-xl border border-gray-100 dark:border-[#222936] shadow-sm overflow-hidden">
-        {sortedSubmissions.length > 0 ? (
+        {visibleSubmissions.length > 0 ? (
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead className="bg-[#F8FAFC] dark:bg-[#202636]">
@@ -378,7 +471,7 @@ export default function ShowFormSubmissions() {
                   <th className="px-4 w-32 text-right">ANSWERS</th>
                 </tr>
               </thead>
-              {sortedSubmissions.map((submission, i) => (
+              {visibleSubmissions.map((submission, i) => (
                 <SubmissionRow
                   key={submission._id}
                   submission={submission}
@@ -387,6 +480,8 @@ export default function ShowFormSubmissions() {
                   fieldsById={fieldsById}
                   tracksAttendance={tracksAttendance}
                   columnCount={columnCount}
+                  onToggleAttendance={toggleAttendance}
+                  updating={updatingIds.includes(submission._id)}
                 />
               ))}
             </table>
@@ -396,12 +491,31 @@ export default function ShowFormSubmissions() {
             <div className="w-14 h-14 rounded-xl bg-gray-100 dark:bg-gray-700/50 flex items-center justify-center mb-4">
               <FileText size={24} className="text-muted" />
             </div>
-            <h3 className="text-foreground font-semibold text-base mb-1">
-              No responses yet
-            </h3>
-            <p className="text-muted text-sm max-w-[280px] text-center">
-              This form hasn&apos;t received any responses yet.
-            </p>
+            {searchTerms.length > 0 ? (
+              <>
+                <h3 className="text-foreground font-semibold text-base mb-1">
+                  No matching responses
+                </h3>
+                <p className="text-muted text-sm max-w-[280px] text-center">
+                  Try a different name, email, ticket or answer.
+                </p>
+                <button
+                  onClick={() => setSearch("")}
+                  className="mt-4 text-xs font-medium text-primary hover:text-primary-dark transition-colors"
+                >
+                  Clear search
+                </button>
+              </>
+            ) : (
+              <>
+                <h3 className="text-foreground font-semibold text-base mb-1">
+                  No responses yet
+                </h3>
+                <p className="text-muted text-sm max-w-[280px] text-center">
+                  This form hasn&apos;t received any responses yet.
+                </p>
+              </>
+            )}
           </div>
         )}
       </div>
