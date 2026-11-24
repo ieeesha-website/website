@@ -8,6 +8,7 @@ const {
   sendBulkEmailsFromDB,
   getPaginatedEmails,
   getEmailQuotaUsage,
+  bulkDeleteEmailLogs,
 } = require("../controllers/emailController");
 const { protect, authorize } = require("../middleware/authMiddleware");
 const { VIEW_ROLES, WRITE_ROLES } = require("../constants/roles");
@@ -64,6 +65,15 @@ emailRouter.get(
   protect,
   authorize(...VIEW_ROLES),
   getPaginatedEmails,
+);
+
+// Bulk delete — destructive, so xcom only. Missing/invalid ids are ignored by
+// the controller; the request succeeds with the count actually removed.
+emailRouter.post(
+  "/logs/bulk-delete",
+  protect,
+  authorize(...WRITE_ROLES),
+  bulkDeleteEmailLogs,
 );
 
 // 3. Remaining transactional allowance, shown as a progress bar in settings.
