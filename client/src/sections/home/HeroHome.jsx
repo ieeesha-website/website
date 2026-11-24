@@ -100,7 +100,7 @@ export default function Hero() {
 				<div className='relative p-0.5 rounded-3xl'>
 				{!imgLoaded && <ImageSkeleton />}
 				<img
-				  src={imgFailed ? FamilyFallback : "https://res.cloudinary.com/xcdyzvmc/image/upload/v1785685478/ieee-family.jpg_ezqw29.jpg"}
+				  src={imgFailed ? FamilyFallback : "https://res.cloudinary.com/otvxv2ll/image/upload/v1795550382/ieee-family-s11.webp"}
 					alt="IEEE family"
 					className="w-full rounded-3xl shadow-2xl border-2 border-white/50"
 					onLoad={() => setImgLoaded(true)}
