@@ -122,7 +122,7 @@ export default function Hero() {
               src={
                 imgFailed
                   ? FamilyFallback
-                  : "https://res.cloudinary.com/xcdyzvmc/image/upload/v1785685478/ieee-family.jpg_ezqw29.jpg"
+                  : "https://res.cloudinary.com/otvxv2ll/image/upload/v1795550382/ieee-family-s11.webp"
               }
               alt="IEEE family"
               className="w-full rounded-3xl shadow-2xl border-2 border-white/50"
@@ -142,25 +142,6 @@ export default function Hero() {
           </div>
         </div>
 
-				</div>
-
-				{/* Right Section - images & visuals */}
-				<div className='relative p-0.5 rounded-3xl'>
-				{!imgLoaded && <ImageSkeleton />}
-				<img
-				  src={imgFailed ? FamilyFallback : "https://res.cloudinary.com/otvxv2ll/image/upload/v1795550382/ieee-family-s11.webp"}
-					alt="IEEE family"
-					className="w-full rounded-3xl shadow-2xl border-2 border-white/50"
-					onLoad={() => setImgLoaded(true)}
-					onError={() => setImgFailed(true)}
-				 />
-					<div className='absolute -bottom-5 -right-3 lg:-bottom-8 lg:-right-5 p-3.5 md:p-4.5 lg:p-6 flex items-center flex-col justify-center bg-main rounded-2xl'>
-						<img src={RocketIcon} alt="Rocket Icon" className='w-6 h-6 md:w-12 md:h-12'/>
-						<span className='mt-3 text-center text-primary text-[11px] md:text-sm'>Innovation Hub</span>
-					</div>
-				</div>
-			</div>
-
 			{/* Mouse Scroll Indicator */}
 			<div className="absolute bottom-5 lg:bottom-10 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-2">
 			  <div className="w-6 h-10 rounded-full border-2 border-white/60 flex justify-center pt-2">
@@ -169,4 +150,5 @@ export default function Hero() {
 			</div>
 		</div>
 	</section>
+  );
 }
