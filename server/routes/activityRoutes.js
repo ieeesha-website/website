@@ -11,13 +11,19 @@ const {
   getFeaturedActivities,
   swapFeaturedActivities
 } = require('../controllers/activityController');
-const { protect, authorize } = require('../middleware/authMiddleware');
+const { protect, authorize, optionalProtect } = require('../middleware/authMiddleware');
 const { WRITE_ROLES } = require('../constants/roles');
 const upload = require('../middleware/uploadMiddleware');
 
-activityRouter.get('/', getActivities);
-activityRouter.get('/featured', getFeaturedActivities);
-activityRouter.get('/:id', getActivityById);
+// `optionalProtect` rather than `protect`: these reads are public, but a signed-in
+// writer gets to see unpublished activities so the dashboard can list and edit
+// them. It attaches req.user when a valid token is present and otherwise leaves
+// it undefined and continues, so an anonymous visitor is unaffected. The
+// controller decides what that means - it never trusts a query flag to reveal
+// hidden activities, because the endpoint is reachable without a token.
+activityRouter.get('/', optionalProtect, getActivities);
+activityRouter.get('/featured', optionalProtect, getFeaturedActivities);
+activityRouter.get('/:id', optionalProtect, getActivityById);
 
 // The reads above are public, so board needs nothing extra here. Everything
 // below mutates and is xcom-only - board is read-only.

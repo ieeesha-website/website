@@ -97,11 +97,11 @@ export default function FeaturedEvents() {
   // current pair is a read board is allowed to do.
   const canEdit = canWrite(user?.role);
 
-  const { featured, loading, refetch } = useFeaturedEvents();
+  const { featured, loading, refetch } = useFeaturedEvents({ includeHidden: true });
   const { addFeatured } = useAddFeatured(refetch);
   const { removeFeatured } = useRemoveFeatured(refetch);
   const { swapFeatured } = useSwapFeatured(refetch);
-  const { getEventById } = useGetEvent();
+  const { getEventById } = useGetEvent({ includeHidden: true });
   const { updateEvent } = useUpdateEvent(refetch);
 
   const [showPicker, setShowPicker] = useState(false);

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
-  Calendar, MapPin, Eye, Plus, Loader2,
+    Calendar, MapPin, Eye, EyeOff, Plus, Loader2,
+
   Trash2, Edit, ExternalLink, Star, Info, X,
 } from "lucide-react";
 import { useNavigate, useLocation, Link } from "react-router-dom";
@@ -45,7 +46,7 @@ const STATUS_STYLES = {
 
 const FILTERS = ["All", "Active", "Completed"];
 
-function EventCard({ event, onView, onEdit, onDelete, canEdit }) {
+function EventCard({ event, onView, onEdit, onDelete, onToggleVisibility, canEdit }) {
   const typeStyle = TYPE_COLORS[event.typeColor] || TYPE_COLORS.blue;
 	const statusStyle = STATUS_STYLES[event.registrationEnabled ? "Active" : "Completed"];
 
@@ -60,7 +61,16 @@ function EventCard({ event, onView, onEdit, onDelete, canEdit }) {
           </div>
         )}
         <div className="flex items-start justify-between mb-3">
-          <span className={`text-[11px] font-bold px-2.5 py-1 rounded-md border ${typeStyle.bg} ${typeStyle.text} ${typeStyle.border}`}>{EVENT_TYPE_LABELS[event.type] || event.type}</span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className={`text-[11px] font-bold px-2.5 py-1 rounded-md border ${typeStyle.bg} ${typeStyle.text} ${typeStyle.border}`}>{EVENT_TYPE_LABELS[event.type] || event.type}</span>
+            {/* Separate from the Active/Completed badge: that one is about the
+                event's dates, this one is about who can see it. */}
+            {!event.showOnSite && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-md bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400">
+                <EyeOff size={11} /> Hidden
+              </span>
+            )}
+          </div>
           <span className={`flex items-center gap-1.5 text-[11px] font-bold px-2 py-1 rounded-md ${statusStyle.bg} ${statusStyle.text}`}>
             <span className={`w-1.5 h-1.5 rounded-full ${statusStyle.dot}`} />
             {event.registrationEnabled ? "Active" : "Completed"}
@@ -83,6 +93,17 @@ function EventCard({ event, onView, onEdit, onDelete, canEdit }) {
             <button onClick={() => onEdit(event)} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted hover:text-foreground hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-lg transition-colors">
               <Edit size={13} /> Edit
             </button>
+            <button
+              onClick={() => onToggleVisibility(event)}
+              disabled={event.togglingVisibility}
+              title={event.showOnSite ? "Hide from the public site" : "Show on the public site"}
+              aria-label={event.showOnSite ? `Hide ${event.title} from the public site` : `Show ${event.title} on the public site`}
+              aria-pressed={event.showOnSite}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted hover:text-foreground hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {event.showOnSite ? <EyeOff size={13} /> : <Eye size={13} />}
+              {event.showOnSite ? "Hide" : "Show"}
+            </button>
             <button onClick={() => onDelete(event)} aria-label={`Delete ${event.title}`} className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors ml-auto">
               <Trash2 size={13} />
             </button>
@@ -102,7 +123,7 @@ export default function DashboardEvents() {
   const { allEvents, paginatedEvents: events, statusFilter, setFilter, counts, loading, error, page, setPage, pagination, refetch } = useEvents();
   const { updateEvent } = useUpdateEvent(refetch);
   const { deleteEvent } = useDeleteEvent(refetch);
-  const { getEventById } = useGetEvent();
+  const { getEventById } = useGetEvent({ includeHidden: true });
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -111,6 +132,7 @@ export default function DashboardEvents() {
   const [editFullActivity, setEditFullActivity] = useState(null);
   const [viewEventId, setViewEventId] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [togglingId, setTogglingId] = useState(null);
   const [saving, setSaving] = useState(false);
   const [editLoading, setEditLoading] = useState(false);
   const [showFilterInfo, setShowFilterInfo] = useState(false);
@@ -168,6 +190,32 @@ export default function DashboardEvents() {
       toast.error(msg);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Publication is a single boolean on the activity, and PUT /activities/:id
+  // takes a partial body, so this does not need a dedicated toggle endpoint the
+  // way forms do.
+  //
+  // Deliberately not going through useUpdateEvent: that calls buildPayload, which
+  // fills in every absent field with "" and PUT /activities/:id merges the body
+  // straight over the document, so a {showOnSite} payload would blank the title
+  // and content. Sending just the one key is what makes this a partial update.
+  const handleToggleVisibility = async (event) => {
+    setTogglingId(event.id);
+    try {
+      await api.put(`/activities/${event.id}`, { showOnSite: !event.showOnSite });
+      await refetch();
+      toast.success(
+        event.showOnSite
+          ? `"${event.title}" is now hidden from the website`
+          : `"${event.title}" is now visible on the website`
+      );
+    } catch (err) {
+      const msg = err.response?.data?.message || err.response?.data?.error || err.message || "Failed to change visibility";
+      toast.error(msg);
+    } finally {
+      setTogglingId(null);
     }
   };
 
@@ -243,7 +291,7 @@ export default function DashboardEvents() {
       {events.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {events.map((event) => (
-            <EventCard key={event.id} event={event} onView={setViewEventId} onEdit={setEventEditModal} onDelete={setDeleteTarget} canEdit={canEdit} />
+            <EventCard key={event.id} event={{ ...event, togglingVisibility: togglingId === event.id }} onView={setViewEventId} onEdit={setEventEditModal} onDelete={setDeleteTarget} onToggleVisibility={handleToggleVisibility} canEdit={canEdit} />
           ))}
         </div>
       ) : (

@@ -12,6 +12,7 @@ import RequiredAsterisk from "../../../components/ui/RequiredAsterisk";
 import RichTextEditor from "../../../components/dashboard/RichTextEditor";
 import Tooltip from "../../../components/ui/Tooltip";
 import SpeakerManager from "../../../components/dashboard/SpeakerManager";
+import ToggleSwitch from "../../../components/ui/ToggleSwitch";
 import { isHtmlContentEmpty } from "../../../utils/eventUtils";
 // The registration form on an event is a real form, so it collects a name and an
 // email like any other: submitForm requires both, and the attendance ticket and
@@ -24,6 +25,9 @@ const EMPTY_FORM = {
   startDate: toLocalDatetimeString(new Date()),
   endDate: toLocalDatetimeString(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
   maxSubmissions: "", registrationEnabled: true,
+  // Published by default: an event created and not yet announced should not
+  // have to be hidden before it is ready. Turn it off to draft something.
+  showOnSite: true,
   fields: buildDefaultFields(),
 };
 
@@ -290,6 +294,17 @@ export default function CreateEvent() {
                 Previous Events
               </button>
             </div>
+          </div>
+          <div className="sm:col-span-2 rounded-lg border border-gray-200 dark:border-[#222936] px-3.5 py-3">
+            <ToggleSwitch
+              id="event-show-on-site"
+              checked={form.showOnSite}
+              onChange={(v) => set("showOnSite", v)}
+              label="Show on website"
+              description="When off, this event is hidden from the public site but stays here in the dashboard. Anyone with the direct link still cannot open it."
+              onLabel="Visible"
+              offLabel="Hidden"
+            />
           </div>
         </div>
       </SectionCard>

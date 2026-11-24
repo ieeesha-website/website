@@ -94,6 +94,30 @@ export function useCrewForSeason(seasonId) {
 
   const removeMember = (id) => runWrite(() => api.delete(`/crew/${id}`));
 
+  const reorderMembers = async (section, newOrderedList) => {
+    const previousList = state[section] || [];
+    const updatedList = newOrderedList.map((m, index) => ({
+      ...m,
+      order: index,
+    }));
+
+    setState((prev) => ({
+      ...prev,
+      [section]: updatedList,
+    }));
+
+    try {
+      const orderedIds = updatedList.map((m) => m._id);
+      await api.put("/crew/reorder", { orderedIds });
+    } catch (err) {
+      setState((prev) => ({
+        ...prev,
+        [section]: previousList,
+      }));
+      throw err;
+    }
+  };
+
   const belongsToThisSeason = state.seasonId === seasonId;
 
   return {
@@ -107,6 +131,7 @@ export function useCrewForSeason(seasonId) {
     addMember,
     updateMember,
     removeMember,
+    reorderMembers,
     blankMember,
   };
 }
