@@ -122,7 +122,7 @@ export default function Hero() {
               src={
                 imgFailed
                   ? FamilyFallback
-                  : "https://res.cloudinary.com/xcdyzvmc/image/upload/v1785685478/ieee-family.jpg_ezqw29.jpg"
+                  : "https://res.cloudinary.com/otvxv2ll/image/upload/v1795550382/ieee-family-s11.webp"
               }
               alt="IEEE family"
               className="w-full rounded-3xl shadow-2xl border-2 border-white/50"
@@ -142,13 +142,13 @@ export default function Hero() {
           </div>
         </div>
 
-        {/* Mouse Scroll Indicator */}
-        <div className="absolute bottom-5 lg:bottom-10 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-2">
-          <div className="w-6 h-10 rounded-full border-2 border-white/60 flex justify-center pt-2">
-            <div className="w-2 h-2 rounded-full bg-white/80 animate-bounce" />
-          </div>
-        </div>
-      </div>
-    </section>
+			{/* Mouse Scroll Indicator */}
+			<div className="absolute bottom-5 lg:bottom-10 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-2">
+			  <div className="w-6 h-10 rounded-full border-2 border-white/60 flex justify-center pt-2">
+			    <div className="w-2 h-2 rounded-full bg-white/80 animate-bounce" />
+			  </div>
+			</div>
+		</div>
+	</section>
   );
 }

@@ -619,6 +619,35 @@ const editSubmission = catchAsync(async (req, res) => {
 });
 
 
+// @desc    Set a submission's attendance from the submissions table
+// @route   PUT /api/submissions/:id/attendance
+// @access  Private (view roles - board may check people in just as it can scan)
+const updateAttendance = catchAsync(async (req, res) => {
+  const { attended } = req.body;
+
+  if (typeof attended !== 'boolean') {
+    throw new AppError('Attendance must be a boolean', 400);
+  }
+
+  // Go straight through findByIdAndUpdate: Submission's pre-save hook revalidates
+  // every answer against the form and would reject or rewrite old submissions
+  // whose form has since changed. An attendance flip must never touch answers.
+  const update = attended
+    ? { $set: { attended: true, attendedAt: new Date() } }
+    : { $set: { attended: false }, $unset: { attendedAt: '' } };
+
+  const submission = await Submission.findByIdAndUpdate(req.params.id, update, {
+    new: true,
+  });
+
+  if (!submission) {
+    throw new AppError('Submission not found', 404);
+  }
+
+  res.json({ submission });
+});
+
+
 const getSubmissionsForForm = catchAsync(async (req, res) => {
     const { formId } = req.params;
 
@@ -669,6 +698,7 @@ module.exports = {
   getUserSubmission,
   getSubmissions,
   getSubmissionsForForm,
+  updateAttendance,
   editSubmission,
   exportSubmissionsToExcel,
   downloadFile,

@@ -100,7 +100,8 @@ All custom hooks live in `src/hooks/`. They wrap `src/utils/api.js` (Axios) and 
 
 | Hook | Endpoint(s) | Returns | Notes |
 |------|-------------|---------|-------|
-| `useFormSubmissions` (in `useGetSubmissions.js`) | `GET /submissions/form/:id` | `{ submissions, total, isLoading, error }` | |
+| `useFormSubmissions` (in `useGetSubmissions.js`) | `GET /submissions/form/:id` | `{ submissions, setSubmissions, total, form, isLoading, error }` | Fetches the form alongside its responses, so labels and the attendance column work after a refresh |
+| `useToggleSubmissionAttendance` (in `forms/useToggleSubmissionAttendance.js`) | `PUT /submissions/:id/attendance` | `{ toggleAttendance, updatingIds }` | Optimistic Attended / Not Attended switch with rollback on failure; `updatingIds` disables only the row being saved |
 
 ## Utility Files in `src/utils/`
 

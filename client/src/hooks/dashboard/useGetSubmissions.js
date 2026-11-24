@@ -39,5 +39,5 @@ export function useFormSubmissions(formId) {
     fetchSubmissions();
   }, [formId]);
 
-  return { submissions, total, form, isLoading, error };
+  return { submissions, setSubmissions, total, form, isLoading, error };
 }

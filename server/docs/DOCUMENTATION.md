@@ -1913,8 +1913,8 @@ Returns all submissions with aggregate counters.
 ```
 
 *A submission carries no review status. `attended` (and `attendedAt`) is the only
-state it has, set when a ticket is scanned, and the counters above are built from
-it.*
+state it has — set when a ticket is scanned or from the submissions table (see
+3.6.6) — and the counters above are built from it.*
 
 ### 3.6.5 Submissions for One Form (Admin)
 
@@ -1944,7 +1944,43 @@ reloaded page fell back to showing raw field ids instead of the questions.
 // 404 — { "message": "Form not found" }
 ```
 
-### 3.6.6 Export Submissions to Excel
+### 3.6.6 Set Submission Attendance (Admin)
+
+`PUT /api/submissions/:id/attendance`
+
+- **Auth:** Yes - roles: `board`, `xcom` (the same roles that may scan a ticket)
+
+**Request body**
+
+```json
+{ "attended": true }
+```
+
+**Success Response — `200 OK`**
+
+```json
+{
+  "submission": {
+    "_id": "...",
+    "attended": true,
+    "attendedAt": "2026-11-24T10:15:00.000Z"
+  }
+}
+```
+
+Passing `false` clears `attendedAt`. The update writes only the attendance
+fields: answers are never revalidated or rewritten, so older submissions whose
+form has since changed remain intact. The submissions page applies the change
+optimistically and rolls it back if this call fails.
+
+**Error Responses**
+
+```json
+// 400 — { "message": "Attendance must be a boolean" }
+// 404 — { "message": "Submission not found" }
+```
+
+### 3.6.7 Export Submissions to Excel
 
 `GET /api/submissions/export/:formId`
 
@@ -1967,7 +2003,7 @@ is not being tracked.
 // 404 — { "message": "Form not found in database" } | { "message": "No submissions found for this form" }
 ```
 
-### 3.6.7 Download Submitted File
+### 3.6.8 Download Submitted File
 
 `GET /api/submissions/download?url=<encoded cloudinary url>`
 
