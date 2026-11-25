@@ -36,7 +36,7 @@ function ResultModal({ result, onDismiss, onNext }) {
     success: {
       icon: <CheckCircle size={48} className="text-green-500" />,
       title: result.registrant || "Member",
-      subtitle: "Member",
+      subtitle: result.email || "",
       badge: "Attendance Recorded Successfully",
       badgeColor:
         "bg-green-50 text-green-600 dark:bg-green-900/20 dark:text-green-400",
@@ -210,12 +210,16 @@ export default function QRScanner() {
       const newScan = {
         id: Date.now(),
         name: data.registrant || "Member",
-        subtitle: "",
+        subtitle: data.email || "",
         type: "success",
         time: new Date(),
       };
       setRecentScans((prev) => [newScan, ...prev].slice(0, 20));
-      setModalResult({ type: "success", registrant: data.registrant });
+      setModalResult({
+        type: "success",
+        registrant: data.registrant,
+        email: data.email,
+      });
     } catch (err) {
       const status = err.response?.status;
       const message = err.response?.data?.message || err.message || "";
