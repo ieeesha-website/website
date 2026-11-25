@@ -196,7 +196,24 @@ const submitForm = catchAsync(async (req, res) => {
 
   if (form.type === "attendance") {
     ticketCode = `${formId}-${userid || 'guest'}-${nanoid(6)}`;
-    qrImage = await QRCode.toDataURL(ticketCode);
+
+    // The QR is hosted rather than embedded as a `data:` URI: Gmail and Outlook
+    // strip inline data URIs, so the entry pass arrived with a blank square at
+    // the gate. Cloudinary gives the email a normal https image URL. The inline
+    // data URI is kept as a fallback so a Cloudinary outage cannot block a
+    // registration.
+    const qrBuffer = await QRCode.toBuffer(ticketCode, { type: 'png', width: 600, margin: 2 });
+    try {
+      qrImage = await uploadToCloudinary(
+        qrBuffer,
+        `tickets/${formId}`,
+        'image/png',
+        `ticket-${ticketCode}.png`,
+      );
+    } catch (err) {
+      console.error('QR upload failed, falling back to an inline data URL:', err.message);
+      qrImage = `data:image/png;base64,${qrBuffer.toString('base64')}`;
+    }
   }
 
   // 12. Save Submission (guests have no userId — the sparse unique index skips them)
@@ -331,10 +348,13 @@ const scanTicket = catchAsync(async (req, res) => {
     await submission.save();
 
     const user = await User.findById(submission.userId);
+    const name = user?.name || submission.registrantEmail?.split('@')[0] || 'Guest';
+    const email = user?.email || submission.registrantEmail || '';
     res.json({ 
       success: true, 
-      message: `Welcome, ${user ? user.name : 'Guest'}!`,
-      registrant: user ? user.name : submission.registrantEmail
+      message: `Welcome, ${name}!`,
+      registrant: name,
+      email
     });
 
   } catch (error) {

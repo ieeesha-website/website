@@ -89,9 +89,16 @@ function SubmissionRow({
 }) {
   const [expanded, setExpanded] = useState(false);
 
+  // Guests have no linked user, so their full name lives in the form's name
+  // answer. Fall back to the email only when that answer is missing.
+  const nameField = Object.values(fieldsById || {}).find(
+    (field) => /name/i.test(field.label || "") || /(full[_-]?)?name/i.test(field.id || "")
+  );
+  const answerName = nameField ? submission.answers?.[nameField.id] : null;
   const name =
     submission.userId?.name ||
-    submission.registrantEmail?.split("@")[0] ||
+    (typeof answerName === "string" && answerName.trim() ? answerName : "") ||
+    submission.registrantEmail ||
     "Anonymous";
   const email =
     submission.userId?.email || submission.registrantEmail || "—";
@@ -288,12 +295,25 @@ export default function ShowFormSubmissions() {
   const [sortOrder, setSortOrder] = useState("oldest");
   const [orderOpen, setOrderOpen] = useState(false);
 
+  const attendedCount = useMemo(
+    () => submissions.filter((submission) => !!submission.attended).length,
+    [submissions],
+  );
+
   const sortedSubmissions = useMemo(
     () =>
       [...submissions].sort((a, b) => {
+        if (sortOrder === "attendedFirst" || sortOrder === "attendedLast") {
+          const diff = Number(!!b.attended) - Number(!!a.attended);
+          if (diff !== 0) {
+            return sortOrder === "attendedFirst" ? diff : -diff;
+          }
+        }
         const ta = new Date(a.createdAt || 0).getTime();
         const tb = new Date(b.createdAt || 0).getTime();
-        return sortOrder === "oldest" ? ta - tb : tb - ta;
+        return sortOrder === "newest" || sortOrder === "attendedFirst"
+          ? tb - ta
+          : ta - tb;
       }),
     [submissions, sortOrder],
   );
@@ -361,6 +381,12 @@ export default function ShowFormSubmissions() {
             <p className="text-xs text-muted">
               <span className="font-semibold text-foreground">{total}</span>{" "}
               {total === 1 ? "response" : "responses"}
+              {tracksAttendance && (
+                <span className="ms-2">
+                  · <span className="font-semibold text-green-600 dark:text-green-400">{attendedCount}</span>{" "}
+                  attended / {total}
+                </span>
+              )}
             </p>
           </div>
         </div>
@@ -380,7 +406,13 @@ export default function ShowFormSubmissions() {
               className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-foreground border border-border rounded-lg hover:bg-gray-50 dark:hover:bg-white/[0.04] transition-colors shrink-0"
             >
               <ArrowDownUp size={16} />
-              {sortOrder === "oldest" ? "Oldest" : "Newest"}
+              {sortOrder === "oldest"
+                ? "Oldest"
+                : sortOrder === "newest"
+                  ? "Newest"
+                  : sortOrder === "attendedFirst"
+                    ? "Attended First"
+                    : "Attended Last"}
               <ChevronDown
                 size={14}
                 className={`transition-transform ${orderOpen ? "rotate-180" : ""}`}
@@ -392,7 +424,39 @@ export default function ShowFormSubmissions() {
                   className="fixed inset-0 z-10"
                   onClick={() => setOrderOpen(false)}
                 />
-                <div className="absolute right-0 mt-2 w-40 z-20 bg-white dark:bg-[#1a1f2e] border border-gray-100 dark:border-[#222936] rounded-lg shadow-lg overflow-hidden">
+                <div className="absolute right-0 mt-2 w-44 z-20 bg-white dark:bg-[#1a1f2e] border border-gray-100 dark:border-[#222936] rounded-lg shadow-lg overflow-hidden">
+                  {tracksAttendance && (
+                    <>
+                      <button
+                        onClick={() => {
+                          setSortOrder("attendedFirst");
+                          setOrderOpen(false);
+                        }}
+                        className={`w-full flex items-center justify-between px-4 py-2.5 text-sm text-left hover:bg-gray-50 dark:hover:bg-white/[0.04] transition-colors ${
+                          sortOrder === "attendedFirst"
+                            ? "font-semibold text-primary"
+                            : "text-foreground"
+                        }`}
+                      >
+                        Attended First
+                        {sortOrder === "attendedFirst" && <Check size={14} />}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setSortOrder("attendedLast");
+                          setOrderOpen(false);
+                        }}
+                        className={`w-full flex items-center justify-between px-4 py-2.5 text-sm text-left hover:bg-gray-50 dark:hover:bg-white/[0.04] transition-colors ${
+                          sortOrder === "attendedLast"
+                            ? "font-semibold text-primary"
+                            : "text-foreground"
+                        }`}
+                      >
+                        Attended Last
+                        {sortOrder === "attendedLast" && <Check size={14} />}
+                      </button>
+                    </>
+                  )}
                   <button
                     onClick={() => {
                       setSortOrder("oldest");
