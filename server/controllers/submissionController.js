@@ -347,8 +347,23 @@ const scanTicket = catchAsync(async (req, res) => {
 
     await submission.save();
 
-    const user = await User.findById(submission.userId);
-    const name = user?.name || submission.registrantEmail?.split('@')[0] || 'Guest';
+    const user = submission.userId ? await User.findById(submission.userId) : null;
+
+    // Guests have no account to read a name from. Their full name is stored in
+    // the form's name answer, keyed by a generated field id, so resolve the
+    // field the same way submitForm does before falling back to the email.
+    const form = await Form.findById(submission.formId);
+    const nameField = form ? findNameField(form) : null;
+    const nameKey = (nameField && submission.answers?.[nameField.id])
+      ? nameField.id
+      : Object.keys(submission.answers || {}).find(
+          (key) => NAME_KEY_RE.test(key) && submission.answers[key]
+        );
+    const submittedName = nameKey
+      ? String(submission.answers[nameKey] ?? '').trim()
+      : '';
+
+    const name = user?.name || submittedName || submission.registrantEmail?.split('@')[0] || 'Guest';
     const email = user?.email || submission.registrantEmail || '';
     res.json({ 
       success: true, 
