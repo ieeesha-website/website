@@ -6,9 +6,16 @@ const Form = require('../models/FormModel.js');
 const Submission = require('../models/SubmissionModel.js');
 const cloudinary = require('../config/cloudinary.js');
 const sanitizeHtml = require('sanitize-html');
-const { deriveFieldIds, describeFieldIdProblems } = require('../utils/fieldId');
-const { assertIdentityFields } = require('../utils/fieldIdentity');
+const {
+  assertIdentityFields,
+  assertIdentityOnEveryPath
+} = require('../utils/fieldIdentity');
 const { VIEW_ROLES } = require('../constants/roles');
+const {
+  resolveFormSections,
+  validateFormDocument
+} = require('../utils/formDefinition');
+const { runWithOptionalTransaction } = require('../utils/runTransaction');
 
 /**
  * Whether this caller is allowed to see unpublished activities.
@@ -64,6 +71,12 @@ const uploadToCloudinary = (buffer) => {
   });
 };
 
+const parseBoolean = (value, label) => {
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  throw new AppError(`${label} must be true or false`, 400);
+};
+
 const sanitizeHtmlOptions = {
   allowedTags: ["h1","h2","h3","p","b","i","em","strong","u","s","del","mark","ul","ol","li","a","br","hr","blockquote","code","pre","span"],
   allowedAttributes: {
@@ -73,50 +86,80 @@ const sanitizeHtmlOptions = {
 };
 
 const createActivity = catchAsync(async (req, res) => {
-  let { title, content, description, type, speakers, location, registrationEnabled, showOnSite, fields, startDate, endDate, maxSubmissions, formStatus } = req.body;
-  if(!title || !content || !location) {
+  let {
+    title,
+    content,
+    description,
+    type,
+    speakers,
+    location,
+    registrationEnabled,
+    showOnSite,
+    fields,
+    sections,
+    startDate,
+    endDate,
+    maxSubmissions,
+    formStatus
+  } = req.body;
+
+  if (!title || !content || !location) {
     throw new AppError("Title, content, and location are required", 400);
   }
+
   content = sanitizeHtml(content, sanitizeHtmlOptions);
   const activitySpeakers = speakers || [];
+
   if (!startDate) startDate = new Date();
-  if (!endDate) endDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-  coverImageUrl = "";
-  let coverImagePublicId = "";
-  if (req.file) {
-    // console.log("TESTING : req.file:", req.file);
-    const result = await uploadToCloudinary(req.file.buffer);
-    coverImageUrl = result.secure_url;
-    coverImagePublicId = result.public_id;
-  }
-  // Validate the field list *before* writing anything, so a rejected payload
-  // cannot leave an Activity behind with no Form attached. Field ids are derived
-  // from labels and are the keys answers are stored under, so unusable or
-  // colliding labels are refused rather than producing a form whose two inputs
-  // share one answer.
-  if (!fields) {
-    fields = [
-      { label: "Name", type: "TextInput", required: true },
-      { label: "Email", type: "TextInput", required: true }
-    ];
-  } else if (!Array.isArray(fields) || fields.length === 0) {
-    throw new AppError("A registration form needs at least one field", 400, 'NO_FIELDS');
+
+  if (!endDate) {
+    endDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
   }
 
-  const { emptyLabels, duplicates } = deriveFieldIds(fields);
-  if (emptyLabels.length > 0 || duplicates.length > 0) {
-    throw new AppError(
-      describeFieldIdProblems({ emptyLabels, duplicates }),
-      400,
-      'INVALID_FIELD_IDS'
-    );
+  const resolvedSections = resolveFormSections({
+    sections,
+    fields,
+    defaultFields: [
+      { label: 'Name', type: 'TextInput', required: true },
+      { label: 'Email', type: 'TextInput', required: true }
+    ]
+  }, AppError);
+  const resolvedFields = resolvedSections.flatMap(section => section.fields);
+  assertIdentityFields(resolvedFields, AppError);
+  assertIdentityOnEveryPath(resolvedSections, AppError);
+
+  if (registrationEnabled !== undefined) {
+    registrationEnabled = parseBoolean(registrationEnabled, 'registrationEnabled');
+  }
+  if (showOnSite !== undefined) showOnSite = parseBoolean(showOnSite, 'showOnSite');
+  if (maxSubmissions === '') maxSubmissions = undefined;
+  if (maxSubmissions === null) maxSubmissions = undefined;
+  if (
+    !Number.isInteger(Number(maxSubmissions)) &&
+    maxSubmissions !== undefined &&
+    maxSubmissions !== null
+  ) {
+    throw new AppError('maxSubmissions must be a positive integer', 400);
+  }
+  if (
+    maxSubmissions !== undefined &&
+    maxSubmissions !== null &&
+    Number(maxSubmissions) < 1
+  ) {
+    throw new AppError('maxSubmissions must be a positive integer', 400);
   }
 
-  // An activity form is a real form, so it collects a name and an email like any
-  // other: submitForm needs both, and the attendance ticket is keyed on the email.
-  assertIdentityFields(fields, AppError);
+  const formStartDate = new Date(startDate);
+  const formEndDate = new Date(endDate);
+  if (
+    Number.isNaN(formStartDate.getTime()) ||
+    Number.isNaN(formEndDate.getTime()) ||
+    formStartDate > formEndDate
+  ) {
+    throw new AppError('Activity start date must be before or equal to end date', 400);
+  }
 
-  const activity = await Activity.create({
+  const activity = new Activity({
     title,
     content,
     description: description || "",
@@ -125,33 +168,63 @@ const createActivity = catchAsync(async (req, res) => {
     location,
     startDate,
     endDate,
-    coverImage: coverImageUrl || "",
-    coverImagePublicId: coverImagePublicId || "",
-    // `?? true` rather than a bare pass-through: an unchecked HTML box sends
-    // nothing at all, and `undefined` would be stored as a missing field, which
-    // the "not false" read would then treat as published.
+    coverImage: '',
+    coverImagePublicId: '',
     registrationEnabled: registrationEnabled ?? true,
     showOnSite: showOnSite ?? true
   });
 
-  // Create associated form.
-  // Every activity gets an `attendance` form, which is the type that mints the
-  // ticket code the gatekeeper QR scanner reads. This preserves the previous
-  // behaviour (every activity-linked form was ticket-bearing).
-  const form = await Form.create({
+  const form = new Form({
     title: activity.title,
-    activityID: activity._id,
     createdBy: req.user._id,
-    fields,
-    startDate,
-    endDate,
+    sections: resolvedSections,
+    startDate: formStartDate,
+    endDate: formEndDate,
     maxSubmissions,
-    type: "attendance",
-    status: formStatus || "Active"
+    type: 'attendance',
+    status: formStatus || 'Active'
   });
 
-  res.status(201).json({ success: true, message: "Activity created with associated form",  activity, form });
+  try {
+    await activity.validate();
+    await validateFormDocument(form, AppError);
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      throw new AppError(error.message, 400, 'INVALID_ACTIVITY');
+    }
+    throw error;
+  }
+
+  let coverImageUrl = '';
+  let coverImagePublicId = '';
+  if (req.file) {
+    const result = await uploadToCloudinary(req.file.buffer);
+    coverImageUrl = result.secure_url;
+    coverImagePublicId = result.public_id;
+    activity.coverImage = coverImageUrl;
+    activity.coverImagePublicId = coverImagePublicId;
+  }
+
+  try {
+    await activity.save();
+    form.activityID = activity._id;
+    await form.save();
+  } catch (error) {
+    if (activity._id) await Activity.findByIdAndDelete(activity._id);
+    if (coverImagePublicId) {
+      await cloudinary.uploader.destroy(coverImagePublicId).catch(() => {});
+    }
+    throw error;
+  }
+
+  res.status(201).json({
+    success: true,
+    message: "Activity created with associated form",
+    activity,
+    form
+  });
 });
+
 
 const getActivities = catchAsync(async (req, res) => {
   // pagination feature
@@ -312,6 +385,9 @@ const getActivities = catchAsync(async (req, res) => {
 });
 
 const getActivityById = catchAsync(async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new AppError('Invalid Activity ID format', 400);
+  }
   // The same filter as the list, applied through the same query, rather than a
   // second rule written separately. Anything less and the two drift: filtering the
   // list with `{ showOnSite: true }` while testing `activity.showOnSite === true`
@@ -325,52 +401,209 @@ const getActivityById = catchAsync(async (req, res) => {
 });
 
 const updateActivity = catchAsync(async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new AppError('Invalid Activity ID format', 400);
+  }
+
   const existingActivity = await Activity.findById(req.params.id);
   if (!existingActivity) {
     throw new AppError("Activity not found", 404);
   }
+  const oldCoverImagePublicId = existingActivity.coverImagePublicId;
 
-  let updateData = { ...req.body };
-  if (updateData.content) {
+  const allowedActivityFields = [
+    'title',
+    'content',
+    'description',
+    'type',
+    'speakers',
+    'location',
+    'startDate',
+    'endDate',
+    'registrationEnabled',
+    'showOnSite'
+  ];
+  const updateData = {};
+  for (const key of allowedActivityFields) {
+    if (req.body[key] !== undefined) updateData[key] = req.body[key];
+  }
+  if (updateData.content !== undefined) {
     updateData.content = sanitizeHtml(updateData.content, sanitizeHtmlOptions);
   }
-  if(updateData.startDate && updateData.endDate && new Date(updateData.startDate) > new Date(updateData.endDate)) {
-    throw new AppError("Start date cannot be after end date", 400);
+  for (const key of ['registrationEnabled', 'showOnSite']) {
+    if (updateData[key] !== undefined) {
+      updateData[key] = parseBoolean(updateData[key], key);
+    }
   }
-  if (req.body.coverImage === "" && existingActivity.coverImagePublicId) {
-    await cloudinary.uploader.destroy(existingActivity.coverImagePublicId);
-    updateData.coverImage = "";
-    updateData.coverImagePublicId = "";
+
+  const resultingActivity = {
+    ...existingActivity.toObject(),
+    ...updateData
+  };
+  const startDate = new Date(resultingActivity.startDate);
+  const endDate = new Date(resultingActivity.endDate);
+  if (
+    Number.isNaN(startDate.getTime()) ||
+    Number.isNaN(endDate.getTime()) ||
+    startDate > endDate
+  ) {
+    throw new AppError('Activity start date must be before or equal to end date', 400);
   }
+
+  const form = await Form.findOne({ activityID: existingActivity._id });
+  const formKeys = ['sections', 'fields', 'formStatus', 'maxSubmissions'];
+  const hasFormUpdate = formKeys.some(key => req.body[key] !== undefined);
+  if (hasFormUpdate && !form) {
+    throw new AppError('Registration form not found for this activity', 404);
+  }
+
+  let resolvedSections;
+  let requestedMaxSubmissions;
+  if (form && (req.body.sections !== undefined || req.body.fields !== undefined)) {
+    resolvedSections = resolveFormSections({
+      sections: req.body.sections,
+      fields: req.body.fields
+    }, AppError);
+    const formFields = resolvedSections.flatMap(section => section.fields);
+    assertIdentityFields(formFields, AppError);
+    assertIdentityOnEveryPath(resolvedSections, AppError);
+    form.sections = resolvedSections;
+  }
+
+  if (form) {
+    if (updateData.title !== undefined) form.title = updateData.title;
+    form.startDate = startDate;
+    form.endDate = endDate;
+
+    if (req.body.formStatus !== undefined) {
+      if (!Form.schema.path('status').enumValues.includes(req.body.formStatus)) {
+        throw new AppError('Invalid form status', 400);
+      }
+      form.status = req.body.formStatus;
+    }
+    if (req.body.maxSubmissions !== undefined) {
+      if (req.body.maxSubmissions === '') {
+        requestedMaxSubmissions = Number.MAX_SAFE_INTEGER;
+      } else {
+        const maxSubmissions = Number(req.body.maxSubmissions);
+        if (!Number.isInteger(maxSubmissions) || maxSubmissions < 1) {
+          throw new AppError('maxSubmissions must be a positive integer', 400);
+        }
+        requestedMaxSubmissions = maxSubmissions;
+      }
+    }
+  }
+
+  existingActivity.set(updateData);
+  try {
+    await existingActivity.validate();
+    if (form) await validateFormDocument(form, AppError);
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    if (error.name === 'ValidationError' || error.name === 'CastError') {
+      throw new AppError(error.message, 400, 'INVALID_ACTIVITY');
+    }
+    throw error;
+  }
+
+  let newCoverImagePublicId;
   if (req.file) {
-    if (existingActivity.coverImagePublicId) {
-      await cloudinary.uploader.destroy(existingActivity.coverImagePublicId);
-    }
     const result = await uploadToCloudinary(req.file.buffer);
-    updateData.coverImage = result.secure_url;
-    updateData.coverImagePublicId = result.public_id; 
+    existingActivity.coverImage = result.secure_url;
+    existingActivity.coverImagePublicId = result.public_id;
+    newCoverImagePublicId = result.public_id;
+  } else if (req.body.coverImage === '') {
+    existingActivity.coverImage = '';
+    existingActivity.coverImagePublicId = '';
   }
 
-  const activity = await Activity.findByIdAndUpdate(
-    req.params.id,
-    updateData,
-    { 
-      returnDocument: 'after', 
-      runValidators: true 
+  try {
+    await runWithOptionalTransaction(async session => {
+      const sessionOptions = session ? { session } : {};
+      if (form && requestedMaxSubmissions !== undefined) {
+        const submissionCount = await Submission.countDocuments(
+            { formId: form._id },
+            sessionOptions
+        );
+        await Form.updateOne(
+            { _id: form._id },
+            { $max: { submissionCount } },
+            sessionOptions
+        );
+      }
+      await existingActivity.save(sessionOptions);
+      if (form) await form.save(sessionOptions);
+      if (form && requestedMaxSubmissions !== undefined) {
+        const capacityUpdate = await Form.updateOne(
+            {
+              _id: form._id,
+              $expr: {
+                $lte: [
+                  { $ifNull: ['$submissionCount', 0] },
+                  requestedMaxSubmissions
+                ]
+              }
+            },
+            { $set: { maxSubmissions: requestedMaxSubmissions } },
+            { ...sessionOptions, runValidators: true }
+        );
+        if (!capacityUpdate.matchedCount) {
+          throw new AppError(
+              'maxSubmissions cannot be lower than the number of existing submissions.',
+              400,
+              'MAX_SUBMISSIONS_BELOW_CURRENT'
+          );
+        }
+      }
+    });
+  } catch (error) {
+    if (newCoverImagePublicId) {
+      await cloudinary.uploader.destroy(newCoverImagePublicId).catch(() => {});
     }
-  );
+    throw error;
+  }
 
-  res.json({ success: true, activity });
+  if (form && requestedMaxSubmissions !== undefined) {
+    form.maxSubmissions = requestedMaxSubmissions;
+  }
+
+  if (
+    oldCoverImagePublicId &&
+    oldCoverImagePublicId !== existingActivity.coverImagePublicId
+  ) {
+    await cloudinary.uploader.destroy(oldCoverImagePublicId);
+  }
+
+  res.json({ success: true, activity: existingActivity, form });
 });
 
 // Delete activity + related form + all related submissions
 const deleteActivity = catchAsync(async (req, res) => {
-  const activity = await Activity.findByIdAndDelete(req.params.id);
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new AppError('Invalid Activity ID format', 400);
+  }
+  const activity = await Activity.findById(req.params.id);
   if (!activity) throw new AppError("Activity not found", 404);
 
-  const form = await Form.findOneAndDelete({ activityID: activity._id });
-  if (form) {
-    await Submission.deleteMany({ formID: form._id });
+  const form = await Form.findOne({ activityID: activity._id });
+  await runWithOptionalTransaction(async session => {
+      const sessionOptions = session ? { session } : {};
+      if (form) {
+        const deletion = Submission.deleteMany({ formId: form._id });
+        if (session) deletion.session(session);
+        await deletion;
+        await form.deleteOne(sessionOptions);
+      }
+      await FeaturedActivities.updateMany(
+        { activities: activity._id },
+        { $pull: { activities: activity._id } },
+        sessionOptions
+      );
+      await activity.deleteOne(sessionOptions);
+  });
+
+  if (activity.coverImagePublicId) {
+    await cloudinary.uploader.destroy(activity.coverImagePublicId);
   }
 
   res.json({ success: true, message: "Activity + related form + submissions deleted" });
@@ -382,6 +615,9 @@ const addFeaturedActivity = async (req, res) => {
 
     if (!mongoose.Types.ObjectId.isValid(activityId)) {
       return res.status(400).json({ message: "Invalid Activity ID format" });
+    }
+    if (!(await Activity.exists({ _id: activityId }))) {
+      return res.status(404).json({ message: "Activity not found" });
     }
 
     let featuredDoc = await FeaturedActivities.findOne();
@@ -399,7 +635,7 @@ const addFeaturedActivity = async (req, res) => {
     }
 
     // avoid adding the same activity twice
-    if (featuredDoc.activities.includes(activityId)) {
+    if (featuredDoc.activities.some(id => id.toString() === activityId)) {
       return res.status(400).json({ message: "This activity is already featured." });
     }
 
@@ -444,7 +680,13 @@ const removeFeaturedActivity = async (req, res) => {
     });
 
   } catch (error) {
-    // console.error("Error removing featured activity:", error);
+    if (error instanceof AppError) {
+      return res.status(error.statusCode).json({
+        message: error.message,
+        ...(error.code ? { code: error.code } : {})
+      });
+    }
+    console.error("Error removing featured activity:", error);
     res.status(500).json({ message: "Internal server error" });
   }
 };

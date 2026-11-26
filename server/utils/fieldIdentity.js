@@ -14,6 +14,7 @@
 
 const EMAIL_KEY_RE = /e[-_]?mail/i;
 const NAME_KEY_RE = /^(full[_\-\s]?)?name$/i;
+const { everyPathVisitsSection } = require('./sectionFlow');
 
 const labelOf = (field) => String(field?.label || '').trim();
 
@@ -26,10 +27,40 @@ const isNameField = (field) =>
   NAME_KEY_RE.test(field?.id || '') || NAME_KEY_RE.test(labelOf(field));
 
 /** The first name-collecting field on a form, if it has one. */
-const findNameField = (form) => (form.fields || []).find(isNameField);
+const getFormSections = (form) => {
+  if (Array.isArray(form?.sections) && form.sections.length > 0) {
+    return form.sections;
+  }
+
+  if (Array.isArray(form?.fields) && form.fields.length > 0) {
+    return [{
+      id: 'registration',
+      title: 'Registration',
+      fields: form.fields
+    }];
+  }
+
+  return [];
+};
+
+const getFormFields = (form) =>
+  getFormSections(form).flatMap(section =>
+    Array.isArray(section?.fields) ? section.fields : []
+  );
+
+const withFlatFormFields = (form) => {
+  if (!form) return form;
+  const value = typeof form.toObject === 'function'
+    ? form.toObject()
+    : { ...form };
+  value.fields = getFormFields(value);
+  return value;
+};
+
+const findNameField = (form) => getFormFields(form).find(isNameField);
 
 /** The first email-collecting field on a form, if it has one. */
-const findEmailField = (form) => (form.fields || []).find(isEmailField);
+const findEmailField = (form) => getFormFields(form).find(isEmailField);
 
 /**
  * Reject a field list that could never be submitted.
@@ -48,15 +79,17 @@ function assertIdentityFields(fields, AppError) {
   const nameField = (fields || []).find(isNameField);
   if (!nameField) {
     missing.push('a "Full Name" field');
-  } else if (!nameField.required) {
-    missing.push('the "Full Name" field marked as required');
+  } else {
+    if (!nameField.required) missing.push('the "Full Name" field marked as required');
+    if (nameField.type !== 'TextInput') missing.push('the "Full Name" field as a text input');
   }
 
   const emailField = (fields || []).find(isEmailField);
   if (!emailField) {
     missing.push('an "Email" field');
-  } else if (!emailField.required) {
-    missing.push('the "Email" field marked as required');
+  } else {
+    if (!emailField.required) missing.push('the "Email" field marked as required');
+    if (emailField.type !== 'TextInput') missing.push('the "Email" field as a text input');
   }
 
   if (missing.length === 0) return;
@@ -69,12 +102,40 @@ function assertIdentityFields(fields, AppError) {
   );
 }
 
+function assertIdentityOnEveryPath(sections, AppError) {
+  const checks = [
+    [isNameField, 'a required Full Name field'],
+    [isEmailField, 'a required Email field']
+  ];
+
+  for (const [matches, label] of checks) {
+    const covered = everyPathVisitsSection(
+        sections,
+        section => (section?.fields || []).some(field =>
+          matches(field) && field.required === true && field.type === 'TextInput'
+        )
+    );
+
+    if (!covered) {
+      throw new AppError(
+          `Every possible form path must include ${label}.`,
+          400,
+          'MISSING_IDENTITY_FIELDS'
+      );
+    }
+  }
+}
+
 module.exports = {
   EMAIL_KEY_RE,
   NAME_KEY_RE,
   isEmailField,
   isNameField,
+  getFormSections,
+  getFormFields,
+  withFlatFormFields,
   findEmailField,
   findNameField,
   assertIdentityFields,
+  assertIdentityOnEveryPath,
 };

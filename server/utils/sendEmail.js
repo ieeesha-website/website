@@ -95,7 +95,7 @@ const getEmailQuota = async () => {
 
 // // ===================== PROVIDER: RESEND (disabled) =====================
 // // Single Resend client shared by the whole app
-// const resend = new Resend(process.env.RESEND_API_KEY);
+// const resend = new Resend(process..env.RESEND_API_KEY);
 //
 // // Verified sender in Resend (noreply@ieeesha.org)
 // const SENDER_EMAIL = 'IEEE SHA Student Branch <noreply@ieeesha.org>';

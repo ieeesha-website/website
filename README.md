@@ -58,7 +58,7 @@ cd ../client
 npm install
 
 ### 3. Environment
-Create a `.env` file in the `server` folder with any required secrets. Example `.env`:
+Create a `..env` file in the `server` folder with any required secrets. Example `..env`:
 
 ```
 MONGO_URI=mongodb://localhost:27017/ieee

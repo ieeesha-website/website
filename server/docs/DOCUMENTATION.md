@@ -142,7 +142,7 @@ CLOUDINARY_API_SECRET=your_api_secret
 npm install
 
 # 2. Configure environment
-#    Create a .env file as described in section 1.4
+#    Create a ..env file as described in section 1.4
 
 # 3. Start the development server (nodemon hot-reload)
 npm run dev
@@ -157,12 +157,16 @@ curl http://localhost:5000/
 | Script | Command | Description |
 |--------|---------|-------------|
 | `dev` | `npm run dev` | Start development server with `nodemon` (auto-restart on change). |
+| `test` | `npm test` | Run backend regression tests with Node's built-in test runner. |
 
 ### Deployment Notes
 
 - `index.js` exports the Express app (`module.exports = app`) making it **Vercel serverless-compatible**. Locally, it listens on `PORT` only when run directly (`require.main === module`).
 - In production, auth cookies are issued with `secure: true`, `sameSite: 'none'`, and `domain: '.ieeesha.org'` to support cross-subdomain requests — HTTPS is mandatory.
-- On first DB connection, `Form.syncIndexes()` runs automatically to apply unique indexes.
+- Run `node utils/fixSubmissionIndex.js` once when deploying the guest/member
+  submission uniqueness changes. It migrates legacy guest `userId` values,
+  checks for duplicates, and repairs only the two submission indexes it owns.
+  Index repair is intentionally not run automatically during application startup.
 - Static files are served from `/uploads` (legacy local storage); new uploads stream directly to **Cloudinary**.
 
 ---
@@ -378,17 +382,21 @@ Client-side the same list lives in `client/src/utils/formValidation.js`. The two
 | Field | Type | Notes |
 |-------|------|-------|
 | `formId` | ObjectId → Form | required |
-| `userId` | ObjectId → User | required |
+| `userId` | ObjectId → User or `null` | null for guests |
 | `registrantEmail` | String | indexed denormalized copy for fast filtering |
-| `answers` | Object | `{ field_id: value }`, validated against form fields on save |
+| `answers` | Object | `{ field_id: value }`, validated against visited form fields on save |
 | `otherAnswers` | Object | `{ field_id: text }` for any field answered "Other"; validated with `answers` |
+| `visitedSectionIds` | String[] | Server-derived section path for this submission |
 | `ticketCode` | String | **unique, sparse** — `<formId>-<userId>-<nanoid6>` |
 | `qrImage` | String | QR code as Data URL |
 | `attended` | Boolean | default `false` — the only state a submission carries |
 | `attendedAt` | Date | set during scan |
 | `timestamps` | — | |
 
-**Indexes:** compound **unique** `{ formId: 1, userId: 1 }` → hard guarantee against duplicate submissions.
+**Indexes:** partial **unique** `{ formId: 1, userId: 1 }` for member submissions,
+and partial **unique** `{ formId: 1, registrantEmail: 1 }` for guests. Both enforce
+the corresponding duplicate-submission rule without treating all guests as the
+same user.
 
 ### `pendingrequests` (Committee Requests)
 A member's application to join a committee. A request is created `pending` and is
@@ -1593,11 +1601,19 @@ Creates a form not necessarily tied to an activity (surveys, volunteer applicati
 | `title` | string | ✅ | |
 | `type` | string | ✅ | — (use `"attendance"` for ticketed events) |
 | `description` | string | ➖ | |
-| `fields` | [field] | ➖ | `[{ label: "Full Name", type: "TextInput", required: true }]` |
+| `sections` | [section] | ➖ | One section containing required Full Name and Email fields |
 | `startDate` | date | ➖ | now |
 | `endDate` | date | ➖ | now + 7 days |
 | `maxSubmissions` | number | ➖ | unlimited |
 | `requiresLogin` | boolean | ➖ | `false` — set `true` to require a signed-in member (the builder's "Require login to submit" switch) |
+
+Each section has a `title`, a `fields` array, and an optional stable `id`.
+Choice fields (`Dropdown` or `Checkbox`) can include `routes`: each route maps
+an exact option string to a later section ID, or to `"__submit__"` to finish.
+When no route matches, navigation follows `nextSection` if set, otherwise the
+next section in order. Only one field per section can control navigation.
+Navigation only moves forward. If a `Checkbox` answer selects multiple routed
+options, the first one in the field's `options` order determines the route.
 
 **Request Example**
 
@@ -1607,13 +1623,42 @@ Creates a form not necessarily tied to an activity (surveys, volunteer applicati
   "type": "recruitment",
   "description": "Join our organizing team",
   "requiresLogin": true,
-  "fields": [
-    { "label": "Full Name", "type": "TextInput", "required": true },
-    { "label": "Preferred Committee", "type": "Dropdown", "required": true, "options": ["Technical", "HR", "PR"] },
-    { "label": "Skills", "type": "Checkbox", "required": false, "options": ["Design", "Public Speaking", "Logistics"] },
-    { "label": "Resume", "type": "FileUpload", "required": true }
+  "sections": [
+    {
+      "id": "contact",
+      "title": "Contact",
+      "fields": [
+        { "label": "Full Name", "type": "TextInput", "required": true },
+        { "label": "Email", "type": "TextInput", "required": true },
+        {
+          "label": "Preferred Committee",
+          "type": "Dropdown",
+          "required": true,
+          "options": ["Technical", "HR"],
+          "routes": [
+            { "option": "Technical", "goToSection": "technical" },
+            { "option": "HR", "goToSection": "hr" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "technical",
+      "title": "Technical",
+      "nextSection": "__submit__",
+      "fields": [
+        { "label": "Technical Skills", "type": "TextArea", "required": true }
+      ]
+    },
+    {
+      "id": "hr",
+      "title": "HR",
+      "fields": [
+        { "label": "Why HR?", "type": "TextArea", "required": true }
+      ]
+    }
   ],
-  "endDate": "2026-09-30T23:59:59Z"
+  "endDate": "2027-09-30T23:59:59Z"
 }
 ```
 
@@ -1626,24 +1671,68 @@ Creates a form not necessarily tied to an activity (surveys, volunteer applicati
   "type": "recruitment",
   "status": "Draft",
   "createdBy": "67b2d4e5f6a7b8c9d0e1f2a3",
-  "fields": [
-    { "id": "full_name", "label": "Full Name", "type": "TextInput", "required": true },
-    { "id": "preferred_committee", "label": "Preferred Committee", "type": "Dropdown", "required": true, "options": ["Technical", "HR", "PR"] }
+  "sections": [
+    {
+      "id": "contact",
+      "title": "Contact",
+      "fields": [
+        { "id": "full_name", "label": "Full Name", "type": "TextInput", "required": true },
+        { "id": "email", "label": "Email", "type": "TextInput", "required": true },
+        {
+          "id": "preferred_committee",
+          "label": "Preferred Committee",
+          "type": "Dropdown",
+          "required": true,
+          "options": ["Technical", "HR"],
+          "routes": [
+            { "option": "Technical", "goToSection": "technical" },
+            { "option": "HR", "goToSection": "hr" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "technical",
+      "title": "Technical",
+      "nextSection": "__submit__",
+      "fields": [
+        { "id": "technical_skills", "label": "Technical Skills", "type": "TextArea", "required": true }
+      ]
+    },
+    {
+      "id": "hr",
+      "title": "HR",
+      "fields": [
+        { "id": "why_hr", "label": "Why HR?", "type": "TextArea", "required": true }
+      ]
+    }
   ],
-  "startDate": "2026-08-24T00:00:00.000Z",
-  "endDate": "2026-09-30T23:59:59.000Z",
+  "startDate": "2027-09-23T00:00:00.000Z",
+  "endDate": "2027-09-30T23:59:59.000Z",
   "maxSubmissions": 9007199254740991,
-  "requiresLogin": false
+  "requiresLogin": true
 }
 ```
 
-**Error Responses** — `400 { "message": "Title and Type are required" }`
+The response contains the persisted form `_id` and generated field IDs.
+
+**Error Responses**
+
+```json
+// 400 — invalid or incomplete form definition
+{ "message": "Title and Type are required" }
+// 401/403 — missing login or role not authorized to manage forms
+{ "message": "Not authorized" }
+```
 
 ### 3.5.2 Get Single Form (Public)
 
 `GET /api/form/:id`
 
-Public renderer endpoint. Returns the form **only while it is `Active` and before its end date**.
+Public renderer endpoint. Returns the form only while it is `Active` and within
+its start/end dates. Submission capacity is enforced when submitting. The
+response includes canonical `sections` and a flattened `fields` compatibility
+property.
 
 - **Auth:** No (public)
 
@@ -1655,9 +1744,16 @@ Public renderer endpoint. Returns the form **only while it is `Active` and befor
   "title": "IEEE Day 2026",
   "type": "attendance",
   "status": "Active",
-  "fields": [
-    { "id": "full_name", "label": "Full Name", "type": "TextInput", "required": true },
-    { "id": "t-shirt_size", "label": "T-Shirt Size", "type": "Dropdown", "required": true, "options": ["S", "M", "L"] }
+  "sections": [
+    {
+      "id": "registration",
+      "title": "Registration",
+      "fields": [
+        { "id": "full_name", "label": "Full Name", "type": "TextInput", "required": true },
+        { "id": "email", "label": "Email", "type": "TextInput", "required": true },
+        { "id": "t-shirt_size", "label": "T-Shirt Size", "type": "Dropdown", "required": true, "options": ["S", "M", "L"] }
+      ]
+    }
   ],
   "requiresLogin": false
 }
@@ -1764,7 +1860,7 @@ Updates scheduling/capacity settings.
 
 `POST /api/submissions`
 
-Submits answers to a form. One submission per user per form (DB-enforced). For `attendance`-type forms, a **ticket code + QR image** is generated and the ticket is emailed asynchronously. Uploaded files go to Cloudinary and their URLs replace/add the corresponding answer keys.
+Submits answers to a form. One submission per user per form (DB-enforced). For `attendance`-type forms, a **ticket code + QR image** is generated and the ticket is emailed asynchronously. Uploaded files go to Cloudinary and their URLs replace/add the corresponding answer keys. The backend determines the path from the submitted choice answers, validates required fields only in visited sections, discards answers from skipped sections, and stores the visited section IDs.
 
 - **Auth:** No (session optional)
 - **Headers:** `multipart/form-data` when uploading files (otherwise JSON works)
@@ -1776,19 +1872,29 @@ Submits answers to a form. One submission per user per form (DB-enforced). For `
 | `answers` | JSON object *or* JSON string | ✅ | Keys = form field ids |
 | `files` | binary (any field names) | ➖ | Each `fieldname` maps to a `FileUpload` field id |
 
-**Request Example (JSON)**
+**Request Example (JSON; choose one branch)**
 
 ```json
 {
   "formId": "67d0a1b2c3d4e5f6a7b8c9d1",
   "answers": {
     "full_name": "Ahmed Hassan",
-    "tshirt_size": "L"
+    "email": "ahmed@example.com",
+    "preferred_committee": "Technical",
+    "technical_skills": "API testing and backend development"
   }
 }
 ```
 
-**Server-side Validation (per form schema):** required fields present; dropdown/checkbox answers ∈ options; text fields are strings; file-upload answers are URLs; duplicate submissions rejected; form must be `Active` and unexpired; `maxSubmissions` respected.
+Choice-driven navigation is evaluated from the `answers` object using each
+field's `routes`. The response's `data.visitedSectionIds` identifies the
+sections actually reached; it is derived server-side and must not be supplied
+by the client. Here the answer selects `technical`, so `hr` is skipped. Any
+answer supplied for a skipped section is discarded. Send JSON directly when no
+file fields are involved. For file fields, use `multipart/form-data`, with the
+answers object as JSON text and each file attached under its field ID.
+
+**Server-side Validation (per form schema):** required fields in visited sections present; dropdown/checkbox answers ∈ options; text fields are strings; file-upload answers are URLs; duplicate submissions rejected; form must be `Active` and unexpired; `maxSubmissions` respected.
 
 **Success Response — `201 Created`**
 
@@ -1796,21 +1902,27 @@ Submits answers to a form. One submission per user per form (DB-enforced). For `
 {
   "status": "success",
   "message": "Submitted successfully",
-  "ticketCode": "67d0a1b2c3d4e5f6a7b8c9d1-66f1a2b3c4d5e6f7a8b9c0d1-Vk3GhQ",
   "data": {
     "_id": "67f0aa11bb22cc33dd44ee55",
     "formId": "67d0a1b2c3d4e5f6a7b8c9d1",
-    "userId": "66f1a2b3c4d5e6f7a8b9c0d1",
+    "userId": null,
     "registrantEmail": "ahmed@example.com",
-    "answers": { "full_name": "Ahmed Hassan", "tshirt_size": "L" },
-    "ticketCode": "67d0a1b2c3d4e5f6a7b8c9d1-66f1a2b3c4d5e6f7a8b9c0d1-Vk3GhQ",
-    "qrImage": "data:image/png;base64,iVBORw0KGgo...",
+    "answers": {
+      "full_name": "Ahmed Hassan",
+      "email": "ahmed@example.com",
+      "preferred_committee": "Technical",
+      "technical_skills": "API testing and backend development"
+    },
+    "visitedSectionIds": ["contact", "technical"],
     "attended": false
   }
 }
 ```
 
-*(Forms of any other type omit `ticketCode`.)*
+For an `attendance` form, the response also includes `ticketCode` and `qrImage`
+in `data`. Other form types omit those ticket properties. If the submitter is
+not logged in, `data.userId` is `null`; when `requiresLogin` is `true`, login is
+required before submission.
 
 **Error Responses**
 

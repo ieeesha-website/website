@@ -15,7 +15,7 @@
  * run more than once.
  */
 
-require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+require('dotenv').config({ path: require('path').join(__dirname, '..', '..env') });
 
 const mongoose = require('mongoose');
 const User = require('../models/UserModel');
@@ -25,7 +25,7 @@ const DRY_RUN = process.argv.includes('--dry-run');
 const main = async () => {
   const uri = process.env.MONGO_URI;
   if (!uri) {
-    throw new Error('MONGO_URI is not set. Expected it in server/.env');
+    throw new Error('MONGO_URI is not set. Expected it in server/..env');
   }
 
   await mongoose.connect(uri);

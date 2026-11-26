@@ -1,69 +1,87 @@
 /**
- * One-time index repair: Submission "formId + userId" unique index.
+ * One-time repair and migration for submission uniqueness indexes.
  *
- * Problem
- * -------
- * The index guarding duplicate submissions was built from an older schema that
- * declared it `unique: true, sparse: true`. MongoDB never alters the options of
- * an index that already exists, so the live index stayed non-sparse — and
- * `sparse` would not have worked anyway: for a compound index MongoDB only skips
- * a document when *every* indexed field is missing, and a guest still has
- * `formId`, so guests were indexed as `{ formId: <id>, userId: null }`.
+ * This deliberately drops only the two submission uniqueness indexes whose
+ * definitions changed; it never uses syncIndexes(), which can remove unrelated
+ * indexes. Existing duplicate member or guest submissions are reported before
+ * any indexes are changed.
  *
- * A guest submission has no `userId`, so every guest on a given form collapsed
- * onto the same key. The second guest to submit a form hit a duplicate-key error
- * (11000) and was rejected even though they were a different person.
- *
- * Symptom: only the first guest submission per form was ever accepted; every
- * later one came back as "You already submitted this form".
- *
- * Fix
- * ---
- * Rebuild the index from the schema, which now uses `partialFilterExpression` to
- * constrain uniqueness to submissions that actually carry a userId. Safe to run
- * more than once — it only acts when the live index does not match the schema.
- *
- * Usage:  node utils/fixSubmissionIndex.js
+ * Usage: node utils/fixSubmissionIndex.js
  */
-require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
+require('dotenv').config({ path: require('path').join(__dirname, '../..env') });
 const mongoose = require('mongoose');
 const Submission = require('../models/SubmissionModel');
 
-const INDEX_NAME = 'formId_1_userId_1';
+const INDEXES = [
+  {
+    name: 'formId_1_userId_1',
+    matches: index =>
+      index?.unique === true &&
+      index.partialFilterExpression?.userId?.$type === 'objectId'
+  },
+  {
+    name: 'formId_1_registrantEmail_1',
+    matches: index =>
+      index?.unique === true &&
+      index.partialFilterExpression?.userId?.$type === 'null'
+  }
+];
 
-const isPartial = (idx) =>
-  !!idx?.partialFilterExpression &&
-  idx.partialFilterExpression.userId?.$type === 'objectId';
+async function findDuplicate(filter, groupBy) {
+  const [duplicate] = await Submission.aggregate([
+    { $match: filter },
+    { $group: { _id: groupBy, count: { $sum: 1 } } },
+    { $match: { count: { $gt: 1 } } },
+    { $limit: 1 }
+  ]);
+  return duplicate;
+}
 
 (async () => {
   await mongoose.connect(process.env.MONGO_URI);
   console.log('connected:', mongoose.connection.name);
 
-  const indexes = await Submission.collection.indexes();
-  const target = indexes.find((i) => i.name === INDEX_NAME);
-
-  if (isPartial(target)) {
-    console.log(`${INDEX_NAME} is already a partial unique index — nothing to do.`);
-  } else if (!target) {
-    console.log(`${INDEX_NAME} not found — rebuilding from the schema...`);
-    await Submission.syncIndexes();
-  } else {
-    console.log(
-      `${INDEX_NAME} is unique=%s sparse=%s partial=%s — rebuilding...`,
-      target.unique, !!target.sparse, !!target.partialFilterExpression
+  const duplicateMember = await findDuplicate(
+      { userId: { $type: 'objectId' } },
+      { formId: '$formId', userId: '$userId' }
+  );
+  const duplicateGuest = await findDuplicate(
+      { userId: null },
+      { formId: '$formId', email: '$registrantEmail' }
+  );
+  if (duplicateMember || duplicateGuest) {
+    throw new Error(
+        'Duplicate submissions exist. Resolve them before repairing unique indexes.'
     );
-    await Submission.collection.dropIndex(INDEX_NAME);
-    await Submission.syncIndexes();
   }
 
-  const fixed = (await Submission.collection.indexes()).find((i) => i.name === INDEX_NAME);
-  console.log('\nindex now:', JSON.stringify(fixed, null, 1));
-  console.log(isPartial(fixed)
-    ? '\nOK — each account can submit a form once; guests are unconstrained and de-duplicated by email.'
-    : '\nWARNING — index still does not match the schema.');
+  await Submission.updateMany(
+      { userId: { $exists: false } },
+      { $set: { userId: null } }
+  );
+
+  const existingIndexes = await Submission.collection.indexes();
+  for (const definition of INDEXES) {
+    const existing = existingIndexes.find(index => index.name === definition.name);
+    if (definition.matches(existing)) continue;
+    if (existing) {
+      await Submission.collection.dropIndex(definition.name);
+    }
+  }
+
+  await Submission.createIndexes();
+  const repairedIndexes = await Submission.collection.indexes();
+  for (const definition of INDEXES) {
+    const repaired = repairedIndexes.find(index => index.name === definition.name);
+    if (!definition.matches(repaired)) {
+      throw new Error(`Index ${definition.name} does not match the submission schema.`);
+    }
+    console.log(`Repaired ${definition.name}:`, JSON.stringify(repaired));
+  }
 
   await mongoose.disconnect();
-})().catch((err) => {
-  console.error('index repair failed:', err);
+})().catch(async error => {
+  console.error('submission index repair failed:', error);
+  await mongoose.disconnect();
   process.exit(1);
 });

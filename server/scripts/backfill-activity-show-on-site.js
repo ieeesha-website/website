@@ -24,7 +24,7 @@
  * Dry run first:  node server/scripts/backfill-activity-show-on-site.js --dry-run
  */
 
-require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+require('dotenv').config({ path: require('path').join(__dirname, '..', '..env') });
 
 const mongoose = require('mongoose');
 const Activity = require('../models/ActivityModel');
@@ -40,7 +40,7 @@ const unsetOrNull = (field) => ({ $or: [{ [field]: { $exists: false } }, { [fiel
 const main = async () => {
   const uri = process.env.MONGO_URI;
   if (!uri) {
-    throw new Error('MONGO_URI is not set. Expected it in server/.env');
+    throw new Error('MONGO_URI is not set. Expected it in server/..env');
   }
 
   await mongoose.connect(uri);

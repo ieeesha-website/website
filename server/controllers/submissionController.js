@@ -1,153 +1,222 @@
 const Submission = require('../models/SubmissionModel');
 const Form = require('../models/FormModel');
 const User = require('../models/UserModel');
+const mongoose = require('mongoose');
 const QRCode = require('qrcode');
 const ExcelJS = require('exceljs');
-const { sendSubmissionReceivedEmail, sendCustomSubmissionEmail } = require('../utils/sendEmail');
+const {
+  sendSubmissionReceivedEmail,
+  sendCustomSubmissionEmail,
+} = require('../utils/sendEmail');
 const { nanoid } = require('nanoid');
 const { catchAsync, AppError } = require('../middleware/errorsMiddleware');
 const uploadToCloudinary = require('../utils/uploadToCloudinary');
-const validator = require('validator');
-
-// Answers are keyed by `field.id`, which FormModel derives from the field label,
-// so the id cannot be assumed. The lookup lives in utils/fieldIdentity.js.
-const {
-  EMAIL_KEY_RE,
-  NAME_KEY_RE,
-  isEmailField,
-  isNameField,
-  findEmailField,
-  findNameField,
-} = require('../utils/fieldIdentity');
 const { composeAnswerValue } = require('../utils/otherOption');
+const { validateSubmissionAnswers } = require('../utils/submissionValidation');
+const {
+  getFormFields: getDefinitionFields,
+  isNameField,
+  isEmailField
+} = require('../utils/fieldIdentity');
 
-// ==========================================
-// 1. STUDENT ACTIONS
-// ==========================================
+/**
+ * Flatten fields from the new sections-based form structure.
+ * Answers themselves remain flat, keyed by field IDs.
+ */
+const getFormFields = (form) =>
+    getDefinitionFields(form);
+
+async function reserveSubmissionCapacity(form) {
+  const existingCount = await Submission.countDocuments({ formId: form._id });
+  await Form.updateOne(
+      { _id: form._id },
+      { $max: { submissionCount: existingCount } }
+  );
+
+  const now = new Date();
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const reserved = await Form.findOneAndUpdate(
+      {
+        _id: form._id,
+        status: 'Active',
+        startDate: { $lte: now },
+        endDate: { $gte: startOfToday },
+        $expr: {
+          $lt: [
+            { $ifNull: ['$submissionCount', 0] },
+            { $ifNull: ['$maxSubmissions', Number.MAX_SAFE_INTEGER] }
+          ]
+        }
+      },
+      { $inc: { submissionCount: 1 } },
+      { returnDocument: 'after' }
+  ).select('+submissionCount');
+
+  if (!reserved) {
+    throw new AppError('Maximum submissions reached', 400, 'MAX_SUBMISSIONS_REACHED');
+  }
+}
+
+async function releaseSubmissionCapacity(formId) {
+  await Form.updateOne(
+      { _id: formId, submissionCount: { $gt: 0 } },
+      { $inc: { submissionCount: -1 } }
+  );
+}
+
+/**
+ * Format a date as YYYY-MM-DD using local time.
+ */
+const formatDate = (date) => {
+  if (!date) return '-';
+
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return '-';
+
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+
+  return `${y}-${m}-${day}`;
+};
+
+/**
+ * Format a date as 12-hour HH:mm AM/PM using local time.
+ */
+const formatTime = (date) => {
+  if (!date) return '-';
+
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return '-';
+
+  return `${String(d.getHours() % 12 || 12).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} ${d.getHours() >= 12 ? 'PM' : 'AM'}`;
+};
+
+/**
+ * Parse an object supplied either as JSON text or an actual object.
+ */
+const parseObjectInput = (value, label, defaultValue = {}) => {
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      throw new AppError(`${label} must be valid JSON`, 400);
+    }
+  }
+
+  if (value === undefined || value === null) {
+    return defaultValue;
+  }
+
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new AppError(`${label} must be a JSON object`, 400);
+  }
+
+  return value;
+};
 
 // @desc    Submit a form & Get Ticket
 // @route   POST /api/submissions
-// @access  Public — anyone can submit; only forms with `requiresLogin` need an account
+// @access  Public — forms with requiresLogin require an account
 
 const submitForm = catchAsync(async (req, res) => {
   const { formId } = req.body;
-  let answers = req.body.answers;
 
-  if (!formId || !answers) {
+  const answers = parseObjectInput(req.body.answers, 'Answers', undefined);
+
+  if (!formId || answers === undefined) {
     throw new AppError('Form ID and answers are required', 400);
   }
 
-  // 1. extract answers from the request body
-  if (typeof answers === 'string') {
-    try {
-      answers = JSON.parse(answers);
-    } catch (err) {
-      throw new AppError('Invalid answers format, must be valid JSON', 400);
-    }
-  }
+  let otherAnswers = parseObjectInput(
+      req.body.otherAnswers,
+      'otherAnswers'
+  );
 
-  if (typeof answers !== 'object' || answers === null || Array.isArray(answers)) {
-    throw new AppError('Answers must be a JSON object', 400);
-  }
-
-  // Free text typed against an "Other" choice, sent beside the answers so the
-  // answers stay a clean list of declared options. Parsed here rather than in the
-  // model so a malformed value is a 400 from the request instead of a surprise
-  // halfway through a save.
-  let otherAnswers = req.body.otherAnswers;
-  if (typeof otherAnswers === 'string') {
-    try {
-      otherAnswers = JSON.parse(otherAnswers);
-    } catch (err) {
-      throw new AppError('Invalid otherAnswers format, must be valid JSON', 400);
-    }
-  }
-  if (otherAnswers === undefined || otherAnswers === null) otherAnswers = {};
-  if (typeof otherAnswers !== 'object' || Array.isArray(otherAnswers)) {
-    throw new AppError('otherAnswers must be a JSON object', 400);
-  }
-
-  // POST /submissions is public — `req.user` is only set by `optionalProtect`
-  // when a valid session cookie was sent (i.e. the submitter has an account).
-  const userid = req.user?._id;
+  // The optional authentication middleware sets req.user when a valid
+  // authenticated session is present.
+  const userid = req.user?._id || null;
   const userName = req.user?.name;
 
-  // 2. Validate Form
+  // 1. Load the form.
+  if (!mongoose.Types.ObjectId.isValid(formId)) {
+    throw new AppError('Invalid form ID', 400, 'INVALID_FORM_ID');
+  }
   const form = await Form.findById(formId);
-  if (!form) throw new AppError('Form not found', 404);
 
-  // 3. Check Expiry
-  if (form.status !== "Active" || new Date(form.endDate).setHours(23,59,59,999) < new Date()) {
+  if (!form) {
+    throw new AppError('Form not found', 404);
+  }
+
+  // 2. Check form status and expiry.
+  const formEndDate = new Date(form.endDate);
+  formEndDate.setHours(23, 59, 59, 999);
+  const formStartDate = new Date(form.startDate);
+
+  if (
+      form.status !== 'Active' ||
+      Number.isNaN(formEndDate.getTime()) ||
+      Number.isNaN(formStartDate.getTime()) ||
+      formEndDate < new Date() ||
+      formStartDate > new Date()
+  ) {
     throw new AppError('This form is currently closed', 400);
   }
 
-  // Forms that opt in to `requiresLogin` still need an account.
+  // 3. Enforce login requirement.
   if (form.requiresLogin && !userid) {
     throw new AppError('Please log in to submit this form', 401);
   }
 
-  // 4. Resolve the name + email answers.
-  //    Prefer the form's own declared fields; fall back to scanning the answer
-  //    keys so forms whose builder labels are unusual still work.
-  const nameField = findNameField(form);
-  const emailField = findEmailField(form);
+  // 4. Get fields from either the canonical sections or a legacy flat form.
+  const fields = getFormFields(form);
+  const uploadedFiles = req.files || [];
+  const uploadedFieldIds = uploadedFiles.map(file => file.fieldname);
+  if (new Set(uploadedFieldIds).size !== uploadedFieldIds.length) {
+    throw new AppError('Only one file may be uploaded per field', 400);
+  }
 
-  const nameKey =
-    (nameField && answers[nameField.id]) ? nameField.id
-      : Object.keys(answers).find((k) => NAME_KEY_RE.test(k) && answers[k]);
-  const emailKey =
-    (emailField && answers[emailField.id]) ? emailField.id
-      : Object.keys(answers).find((k) => EMAIL_KEY_RE.test(k) && answers[k]);
-
-  const submittedName = nameKey ? String(answers[nameKey] ?? '').trim() : '';
-  const submittedEmailRaw = emailKey ? String(answers[emailKey] ?? '').trim() : '';
-
-  // 6. A valid email is mandatory — it is where every follow-up gets sent.
-  //    The address the submitter typed is the one used, signed in or not. The
-  //    form prefills the account email for a member who is signed in, but they
-  //    are allowed to change it (a personal address for an event, say), and that
-  //    is the address the confirmation and the ticket go to. Reading the account
-  //    email here instead meant the value stored and the value mailed disagreed.
-  const submittedEmail = submittedEmailRaw.toLowerCase();
-
-  // Store the normalised values, not the raw padding, so exports and the admin
-  // submissions table show clean data. This runs for a signed-in member too, so
-  // the answer an admin sees is the same address that was mailed and stored in
-  // `registrantEmail`.
-  if (nameKey) answers[nameKey] = submittedName;
-  if (emailKey) answers[emailKey] = submittedEmail;
-
-  // 5. Full Name is mandatory for everyone, signed in or not. `SubmissionModel`'s
-  //    pre-save hook enforces every `required: true` field anyway, so exempting
-  //    members here would only produce a confusing second error later.
-  if (!submittedName) {
+  const validation = validateSubmissionAnswers(
+      form,
+      answers,
+      otherAnswers,
+      { uploadedFieldIds }
+  );
+  if (validation.errors.length) {
     throw new AppError(
-      nameField?.label ? `${nameField.label} is required` : 'Full Name is required',
-      400,
-      'NAME_REQUIRED'
+        `Submission failed validation: ${validation.errors.join(' | ')}`,
+        400,
+        'INVALID_SUBMISSION'
     );
   }
-
-  if (!submittedEmail) {
-
-    throw new AppError(
-      emailField?.label ? `${emailField.label} is required` : 'An email address is required',
-      400,
-      'EMAIL_REQUIRED'
-    );
+  const cleanAnswers = validation.answers;
+  const cleanOtherAnswers = validation.otherAnswers;
+  for (const field of validation.fields) {
+    if (
+      field.type === 'FileUpload' &&
+      Object.prototype.hasOwnProperty.call(answers, field.id) &&
+      answers[field.id] !== null &&
+      answers[field.id] !== '' &&
+      !uploadedFieldIds.includes(field.id)
+    ) {
+      throw new AppError(`Upload a file for '${field.label}' using the file field`, 400);
+    }
   }
+  const nameField = validation.fields.find(isNameField);
+  const emailField = validation.fields.find(isEmailField);
+  const submittedName = cleanAnswers[nameField.id];
+  const submittedEmail = cleanAnswers[emailField.id];
 
-  if (!validator.isEmail(submittedEmail)) {
-    throw new AppError('Please enter a valid email address', 400, 'EMAIL_INVALID');
-  }
-
-  // 7. One account per email address. A guest whose email already has an
-  //    account must log in instead of submitting a second, unlinked identity.
-  //    This is a guest-onboarding rule, so it only applies to guests. A member is
-  //    already authenticated and may submit under a different address on purpose
-  //    — that address is the contact for this submission, not a new identity.
+  // 8. Guest onboarding rule:
+  // Guests cannot submit using an email already associated with an account.
   if (!userid) {
-    const accountOwner = await User.findOne({ email: submittedEmail }).select('_id').lean();
+    const accountOwner = await User.findOne({
+      email: submittedEmail,
+    })
+        .select('_id')
+        .lean();
+
     if (accountOwner) {
       throw new AppError(
         'An account is already associated with this email address. Please log in with it to continue.',
@@ -157,158 +226,148 @@ const submitForm = catchAsync(async (req, res) => {
     }
   }
 
-  // 8. Check max submissions
-  const submissionsCount = await Submission.countDocuments({ formId });
-  if (submissionsCount >= form.maxSubmissions) {
-    throw new AppError('Maximum submissions reached', 400);
-  }
-
-  // 9. Prevent duplicate submissions
-  //    - Logged-in users are tracked by userId.
-  //    - Guests fall back to their email answer, so an email field is required.
+  // 9. Check submission limit.
+  // 6. Prevent duplicate submissions before reserving a capacity slot.
   let existingSubmission;
+
   if (userid) {
-    existingSubmission = await Submission.findOne({ formId, userId: userid });
+    existingSubmission = await Submission.findOne({
+      formId,
+      userId: userid,
+    });
   } else {
-    existingSubmission = await Submission.findOne({ formId, registrantEmail: submittedEmail });
+    existingSubmission = await Submission.findOne({
+      formId,
+      registrantEmail: submittedEmail,
+    });
   }
 
   if (existingSubmission) {
-    throw new AppError('You already submitted this form', 400, 'ALREADY_SUBMITTED');
+    throw new AppError(
+      'You already submitted this form',
+      400,
+      'ALREADY_SUBMITTED'
+    );
   }
 
-  // 10. upload files to cloudinary
-  if (req.files && req.files.length > 0) {
-    for (const file of req.files) {
-      // random string for unique file name
-      const folderPath = `submissions/${formId}`;
-      const fileUrl = await uploadToCloudinary(file.buffer, folderPath, file.mimetype, file.originalname + `-${nanoid(6)}`);
-
-      answers[file.fieldname] = fileUrl;
+  for (const file of uploadedFiles) {
+    const field = validation.fields.find(f => f.id === file.fieldname);
+    if (!field || field.type !== 'FileUpload') {
+      throw new AppError(`Unexpected file upload field: ${file.fieldname}`, 400);
     }
   }
 
-  // 11. Generate Ticket (ONLY for `attendance` forms)
-  //     The ticket is still stored because the admin QR scanner
-  //     (POST /api/submissions/scan) depends on it for attendance.
-  let ticketCode;
-  let qrImage;
-
-  if (form.type === "attendance") {
-    ticketCode = `${formId}-${userid || 'guest'}-${nanoid(6)}`;
-    qrImage = await QRCode.toDataURL(ticketCode);
-  }
-
-  // 12. Save Submission (guests have no userId — the sparse unique index skips them)
-  const newSubmission = new Submission({
-    formId,
-    ...(userid && { userId: userid }),
-    registrantEmail: submittedEmail,
-    answers,
-    otherAnswers,
-    // use spread operator to add ticketCode and qrImage to the newSubmission object if form type is registration
-    ...(ticketCode && { ticketCode }),
-    ...(qrImage && { qrImage })
-  });
-
+  await reserveSubmissionCapacity(form);
+  let submissionSaved = false;
   try {
+    for (const file of uploadedFiles) {
+      const fileUrl = await uploadToCloudinary(
+          file.buffer,
+          `submissions/${formId}`,
+          file.mimetype,
+          `${file.originalname}-${nanoid(6)}`
+      );
+      cleanAnswers[file.fieldname] = fileUrl;
+    }
+
+    // Generate tickets only for attendance forms.
+    let ticketCode;
+    let qrImage;
+    if (form.type === 'attendance') {
+      ticketCode = `${formId}-${userid || 'guest'}-${nanoid(6)}`;
+      qrImage = await QRCode.toDataURL(ticketCode);
+    }
+
+    const newSubmission = new Submission({
+      formId,
+      userId: userid,
+      registrantEmail: submittedEmail,
+      answers: cleanAnswers,
+      otherAnswers: cleanOtherAnswers,
+      visitedSectionIds: validation.visitedSectionIds,
+      ...(ticketCode && { ticketCode }),
+      ...(qrImage && { qrImage }),
+    });
+
     await newSubmission.save();
+    submissionSaved = true;
+
+    // Prepare email data only from the validated, visited path.
+    const recipientName = userName || submittedName || 'there';
+
+    const dbSubmissions = {
+      name: recipientName,
+      email: submittedEmail,
+      formTitle: form.title,
+      formType: form.type,
+      ticketCode,
+      submittedAt: new Date().toISOString().slice(0, 10),
+    };
+
+    for (const field of validation.fields) {
+      const raw = cleanAnswers[field.id];
+
+      let value;
+
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        value = raw.url || raw.path || raw.name || '';
+      } else {
+        value = composeAnswerValue(field, raw, cleanOtherAnswers);
+      }
+
+      if (field.label) {
+        dbSubmissions[String(field.label).trim().toLowerCase()] = value;
+      }
+
+      if (field.id) {
+        dbSubmissions[String(field.id).trim().toLowerCase()] = value;
+      }
+    }
+
+    const dbUser = userid ? req.user : null;
+
+    if (form.sendEmailOnSubmission) {
+      sendCustomSubmissionEmail({
+        to: submittedEmail,
+        subject:
+            (form.submissionEmailSubject &&
+                form.submissionEmailSubject.trim()) ||
+            `We received your submission for ${form.title}`,
+        messageBody: form.submissionEmailBody,
+        formTitle: form.title,
+        userName: recipientName,
+        ticketCode,
+        qrDataUrl: form.type === 'attendance' ? qrImage : null,
+        dbUser,
+        dbSubmissions,
+      }).catch(err => console.error('Email Error:', err));
+    } else {
+      sendSubmissionReceivedEmail({
+        email: submittedEmail,
+        userName: recipientName,
+        formTitle: form.title,
+        dbUser,
+        dbSubmissions,
+      }).catch(err => console.error('Email Error:', err));
+    }
+
+    res.status(201).json({
+      status: 'success',
+      message: 'Submitted successfully',
+      ...(ticketCode && { ticketCode }),
+      data: newSubmission,
+    });
   } catch (error) {
+    if (!submissionSaved) await releaseSubmissionCapacity(form._id);
     if (error.name === 'ValidationError') {
       throw new AppError(`Submission failed validation: ${error.message}`, 400);
     }
     if (error.code === 11000) {
-      throw new AppError('You already submitted this form', 400, 'ALREADY_SUBMITTED');
+      throw new AppError('You already submitted this form', 409, 'ALREADY_SUBMITTED');
     }
-    throw new AppError(`Submission failed: ${error.message}`, 500);
+    throw error;
   }
-
-  // 13. Send Email (Async)
-  //     When the form author turned on `sendEmailOnSubmission`, the message they
-  //     wrote is what goes out, and an `attendance` form carries its QR in that
-  //     same message. Otherwise the neutral acknowledgement is sent, as before.
-  //
-  //     This replaces the old always-on QR "ticket confirmation" email, which
-  //     fired for every form and read as an event ticket even for ordinary
-  //     applications. The ticket itself is still generated and stored, because
-  //     the admin QR scanner (POST /api/submissions/scan) depends on it.
-  const recipientName = userName || submittedName || 'there';
-
-  // 13a. The author's email lookups.
-  //
-  //      `db-submissions[Field Name]` reads this form's own answers, keyed by
-  //      label and by field id, because the submitter wrote the label while the
-  //      answers are stored under the id the server derived from it.
-  //
-  //      `db-user[field]` reads the submitter's account, or resolves to nothing
-  //      at all for a guest, in which case the placeholder is left as written.
-  const dbSubmissions = {
-    // The recommended names, so the author can reach the values that are not
-    // answer fields. A form field of the same name wins, which is the sensible
-    // outcome: an author who asked for "Name" wants the answer they collected.
-    name: recipientName,
-    email: submittedEmail,
-    formTitle: form.title,
-    formType: form.type,
-    ticketCode,
-    submittedAt: new Date().toISOString().slice(0, 10),
-  };
-
-  for (const field of form.fields || []) {
-    const raw = answers[field.id];
-    let value;
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      // An uploaded file answer is stored as an object; show the link.
-      value = raw.url || raw.path || raw.name || '';
-    } else {
-      // Joins an "Other" choice back onto the detail the submitter typed, so
-      // `db-submissions[Committee]` reads "Other: Embedded systems" rather than
-      // the bare word "Other". Any other answer passes through unchanged.
-      value = composeAnswerValue(field, raw, otherAnswers);
-    }
-    if (field.label) dbSubmissions[String(field.label).trim().toLowerCase()] = value;
-    if (field.id) dbSubmissions[String(field.id).trim().toLowerCase()] = value;
-  }
-  const dbUser = userid ? req.user : null;
-
-  if (form.sendEmailOnSubmission) {
-    sendCustomSubmissionEmail({
-      to: submittedEmail,
-      subject:
-        (form.submissionEmailSubject && form.submissionEmailSubject.trim()) ||
-        `We received your submission for ${form.title}`,
-      messageBody: form.submissionEmailBody,
-      formTitle: form.title,
-      userName: recipientName,
-      ticketCode,
-      // `qrImage` is only produced for attendance forms; the extra type check
-      // keeps that guarantee at the point the email is built.
-      qrDataUrl: form.type === 'attendance' ? qrImage : null,
-      dbUser,
-      dbSubmissions,
-    }).catch(err => console.error("Email Error:", err));
-  } else {
-    sendSubmissionReceivedEmail({
-      email: submittedEmail,
-      userName: recipientName,
-      formTitle: form.title,
-      dbUser,
-      dbSubmissions
-    }).catch(err => console.error("Email Error:", err));
-  }
-
-  // 14. Send Response
-  res.status(201).json({
-    status: 'success',
-    message: 'Submitted successfully',
-    ...(ticketCode && { ticketCode }),
-    data: newSubmission
-  });
 });
-
-// ==========================================
-// 2. ADMIN / XCOM ACTIONS
-// ==========================================
 
 // @desc    Scan QR Code (Gatekeeper)
 // @route   POST /api/submissions/scan
@@ -316,206 +375,229 @@ const submitForm = catchAsync(async (req, res) => {
 const scanTicket = catchAsync(async (req, res) => {
   const { code } = req.body;
 
-  try {
-    const submission = await Submission.findOne({ ticketCode: code });
-    if (!submission) throw new AppError('Invalid Ticket!', 404);
-
-    if (submission.attended) {
-      throw new AppError('Already Scanned!', 400);
-    }
-
-      // Mark as Attended
-      submission.attended = true;
-      submission.attendedAt = Date.now();
-
-    await submission.save();
-
-    const user = await User.findById(submission.userId);
-    res.json({ 
-      success: true, 
-      message: `Welcome, ${user ? user.name : 'Guest'}!`,
-      registrant: user ? user.name : submission.registrantEmail
-    });
-
-  } catch (error) {
-    res.status(500).json({ message: error.message });
+  if (!code || typeof code !== 'string') {
+    throw new AppError('Ticket code is required', 400);
   }
+
+  const submission = await Submission.findOneAndUpdate(
+      { ticketCode: code, attended: { $ne: true } },
+      { $set: { attended: true, attendedAt: new Date() } },
+      { returnDocument: 'after' }
+  );
+
+  if (!submission) {
+    const existing = await Submission.exists({ ticketCode: code });
+    if (existing) throw new AppError('Already Scanned!', 400);
+    throw new AppError('Invalid Ticket!', 404);
+  }
+
+  const user = submission.userId
+      ? await User.findById(submission.userId)
+      : null;
+
+  res.json({
+    success: true,
+    message: `Welcome, ${user ? user.name : 'Guest'}!`,
+    registrant: user ? user.name : submission.registrantEmail,
+  });
 });
 
-// @desc    Export Responses to Excel (Print Feature)
+// @desc    Export Responses to Excel
 // @route   GET /api/submissions/export?formId=...
 // @access  Private (XCom/Board)
 const exportSubmissionsToExcel = catchAsync(async (req, res) => {
-  try {
-    const { formId } = req.params;
-    if (!formId) return res.status(400).json({ message: 'Form ID is required' });
-    
-    // 1. Get Form & Submissions
-    const form = await Form.findById(formId);
-    if (!form) {
-      return res.status(404).json({ message: 'Form not found in database' });
-    }
-    const submissions = await Submission.find({ formId })
-      .populate('userId', 'name email phone university college yearOfStudy position organization')
+  const { formId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(formId)) {
+    throw new AppError('Invalid form ID', 400, 'INVALID_FORM_ID');
+  }
+
+  const form = await Form.findById(formId);
+
+  if (!form) {
+    throw new AppError('Form not found in database', 404);
+  }
+
+  const submissions = await Submission.find({ formId })
+      .populate(
+          'userId',
+          'name email phone university college yearOfStudy position organization'
+      )
       .sort('-createdAt')
       .lean();
 
-    if (!submissions || submissions.length === 0) {
-      return res.status(404).json({ message: 'No submissions found for this form' });
-    }
+  if (!submissions.length) {
+    throw new AppError('No submissions found for this form', 404);
+  }
 
-    // Only an `attendance` form mints a ticket, so only an `attendance` form can
-    // say whether somebody actually turned up. On a recruitment, feedback,
-    // workshop or survey the scanner never touches these submissions, so the
-    // columns would read "No" on every row and imply a check-in that was never
-    // being tracked. Leave them out instead of printing a permanent "No".
-    const tracksAttendance = form.type === 'attendance';
+  const fields = getFormFields(form);
+  const tracksAttendance = form.type === 'attendance';
 
-    // 2. Setup Excel
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Responses');
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet('Responses');
 
-    // Helper: format a Date as YYYY-MM-DD (local time)
-    const formatDate = (date) => {
-      if (!date) return '-';
-      const d = new Date(date);
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${y}-${m}-${day}`;
-    };
-
-    // Helper: format a Date as HH:mm (time in hours, local time)
-    const formatTime = (date) => {
-      if (!date) return '-';
-      const d = new Date(date);
-      // 12 hour format
-      return `${String(d.getHours() % 12 || 12).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} ${d.getHours() >= 12 ? 'PM' : 'AM'}`;
-      // 24 hour format
-      // return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    };
-
-    // 3. Define Headers (User Info + Question Data)
-    const userInfoColumns = [
-      { header: 'User ID', key: 'userId', width: 28 },
-      { header: 'Submitted Date', key: 'date', width: 15 },
-      { header: 'Submitted Time', key: 'time', width: 12 },
-      ...(tracksAttendance
+  const userInfoColumns = [
+    { header: 'User ID', key: 'userId', width: 28 },
+    { header: 'Submitted Date', key: 'date', width: 15 },
+    { header: 'Submitted Time', key: 'time', width: 12 },
+    ...(tracksAttendance
         ? [
-            { header: 'Attended', key: 'attended', width: 10 },
-            { header: 'Attended Time', key: 'attendedTime', width: 12 },
-          ]
+          { header: 'Attended', key: 'attended', width: 10 },
+          { header: 'Attended Time', key: 'attendedTime', width: 15 },
+        ]
         : []),
-      { header: 'Name', key: 'userName', width: 25 },
-      { header: 'Email', key: 'userEmail', width: 30 },
-      { header: 'Phone', key: 'userPhone', width: 15 },
-      { header: 'Position', key: 'userPosition', width: 15 },
-      { header: 'Organization', key: 'userOrganization', width: 20 },
-      { header: 'University', key: 'userUniversity', width: 25 },
-      { header: 'College', key: 'userCollege', width: 25 },
-      { header: 'Year of Study', key: 'userYearOfStudy', width: 12 },
-    ];
+    { header: 'Name', key: 'userName', width: 25 },
+    { header: 'Email', key: 'userEmail', width: 30 },
+    { header: 'Phone', key: 'userPhone', width: 15 },
+    { header: 'Position', key: 'userPosition', width: 15 },
+    { header: 'Organization', key: 'userOrganization', width: 20 },
+    { header: 'University', key: 'userUniversity', width: 25 },
+    { header: 'College', key: 'userCollege', width: 25 },
+    { header: 'Year of Study', key: 'userYearOfStudy', width: 12 },
+  ];
 
-    // Add columns dynamically based on Form questions
-    const answerColumns = [];
-    if (form.fields && Array.isArray(form.fields)) {
-      form.fields.forEach(field => {
-        answerColumns.push({ header: field.label || 'Question', key: field.id, width: 30 });
-      });
-    }
+  const answerColumns = fields.map(field => ({
+    header: field.label || 'Question',
+    key: field.id,
+    width: 30,
+  }));
 
-    const columns = [...userInfoColumns, ...answerColumns];
-    worksheet.columns = columns.map(col => ({ key: col.key, width: col.width }));
+  const columns = [...userInfoColumns, ...answerColumns];
 
-    // --- Section header row (row 1): user info vs answers ---
-    const sectionRow = worksheet.getRow(1);
-    sectionRow.height = 28;
+  worksheet.columns = columns.map(col => ({
+    key: col.key,
+    width: col.width,
+  }));
 
-    const userInfoCell = sectionRow.getCell(1);
-    userInfoCell.value = 'User Information';
-    userInfoCell.font = { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
-    userInfoCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E79' } };
-    userInfoCell.alignment = { horizontal: 'center', vertical: 'middle' };
-    worksheet.mergeCells(1, 1, 1, userInfoColumns.length);
+  // Grouping row.
+  const sectionRow = worksheet.getRow(1);
+  sectionRow.height = 28;
 
-    if (answerColumns.length > 0) {
-      const answersCell = sectionRow.getCell(userInfoColumns.length + 1);
-      answersCell.value = "User's Answers";
-      answersCell.font = { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
-      answersCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF548235' } };
-      answersCell.alignment = { horizontal: 'center', vertical: 'middle' };
-      worksheet.mergeCells(1, userInfoColumns.length + 1, 1, columns.length);
-    }
+  const userInfoCell = sectionRow.getCell(1);
+  userInfoCell.value = 'User Information';
+  userInfoCell.font = {
+    bold: true,
+    size: 14,
+    color: { argb: 'FFFFFFFF' },
+  };
+  userInfoCell.fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF1F4E79' },
+  };
+  userInfoCell.alignment = {
+    horizontal: 'center',
+    vertical: 'middle',
+  };
 
-    // --- Column header row (row 2): bold + colored background ---
-    const headerRow = worksheet.getRow(2);
-    columns.forEach((col, i) => {
-      headerRow.getCell(i + 1).value = col.header;
-    });
-    headerRow.height = 20;
-    headerRow.eachCell(cell => {
-      cell.font = { bold: true };
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBF7' } };
-      cell.alignment = { horizontal: 'center', vertical: 'middle' };
-      cell.border = {
-        top: { style: 'thin', color: { argb: 'FF9DC3E6' } },
-        left: { style: 'thin', color: { argb: 'FF9DC3E6' } },
-        bottom: { style: 'thin', color: { argb: 'FF9DC3E6' } },
-        right: { style: 'thin', color: { argb: 'FF9DC3E6' } }
-      };
-    });
+  worksheet.mergeCells(1, 1, 1, userInfoColumns.length);
 
-    // 4. Fill Data
-    submissions.forEach(sub => {
-      const rowData = {
-        userId: sub.userId?._id?.toString() || '-',
-        date: formatDate(sub.createdAt),
-        time: formatTime(sub.createdAt),
-        ...(tracksAttendance
-          ? { attended: sub.attended ? 'Yes' : 'No', attendedTime: formatTime(sub.attendedAt) }
+  if (answerColumns.length > 0) {
+    const answersCell = sectionRow.getCell(userInfoColumns.length + 1);
+    answersCell.value = "User's Answers";
+    answersCell.font = {
+      bold: true,
+      size: 14,
+      color: { argb: 'FFFFFFFF' },
+    };
+    answersCell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF548235' },
+    };
+    answersCell.alignment = {
+      horizontal: 'center',
+      vertical: 'middle',
+    };
+
+    worksheet.mergeCells(
+        1,
+        userInfoColumns.length + 1,
+        1,
+        columns.length
+    );
+  }
+
+  // Header row.
+  const headerRow = worksheet.getRow(2);
+
+  columns.forEach((col, index) => {
+    headerRow.getCell(index + 1).value = col.header;
+  });
+
+  headerRow.height = 20;
+
+  headerRow.eachCell(cell => {
+    cell.font = { bold: true };
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFDDEBF7' },
+    };
+    cell.alignment = {
+      horizontal: 'center',
+      vertical: 'middle',
+    };
+    cell.border = {
+      top: { style: 'thin', color: { argb: 'FF9DC3E6' } },
+      left: { style: 'thin', color: { argb: 'FF9DC3E6' } },
+      bottom: { style: 'thin', color: { argb: 'FF9DC3E6' } },
+      right: { style: 'thin', color: { argb: 'FF9DC3E6' } },
+    };
+  });
+
+  // Map field IDs to field definitions for answer formatting.
+  const fieldsById = new Map(fields.map(field => [field.id, field]));
+
+  // Rows.
+  for (const sub of submissions) {
+    const rowData = {
+      userId: sub.userId?._id?.toString() || '-',
+      date: formatDate(sub.createdAt),
+      time: formatTime(sub.createdAt),
+      ...(tracksAttendance
+          ? {
+            attended: sub.attended ? 'Yes' : 'No',
+            attendedTime: formatTime(sub.attendedAt),
+          }
           : {}),
-        userName: sub.userId?.name || 'Guest',
-        userEmail: sub.registrantEmail || sub.userId?.email || '-',
-        userPhone: sub.userId?.phone || '-',
-        userPosition: sub.userId?.position || '-',
-        userOrganization: sub.userId?.organization || '-',
-        userUniversity: sub.userId?.university || '-',
-        userCollege: sub.userId?.college || '-',
-        userYearOfStudy: sub.userId?.yearOfStudy ?? '-',
-      };
+      userName: sub.userId?.name || 'Guest',
+      userEmail: sub.registrantEmail || sub.userId?.email || '-',
+      userPhone: sub.userId?.phone || '-',
+      userPosition: sub.userId?.position || '-',
+      userOrganization: sub.userId?.organization || '-',
+      userUniversity: sub.userId?.university || '-',
+      userCollege: sub.userId?.college || '-',
+      userYearOfStudy: sub.userId?.yearOfStudy ?? '-',
+    };
 
+    if (sub.answers) {
+      for (const [key, value] of Object.entries(sub.answers)) {
+        const field = fieldsById.get(key);
 
-      // Merge Dynamic Answers & Handle Arrays (like Checkboxes)
-      if (sub.answers) {
-        // Keyed by field id, so an "Other" choice can be put back together with
-        // the detail the submitter typed. Without this the spreadsheet says
-        // "Other" and the answer the committee actually needs is missing.
-        const fieldsById = new Map((form.fields || []).map((f) => [f.id, f]));
-        const processedAnswers = {};
-        for (const [key, value] of Object.entries(sub.answers)) {
-          const field = fieldsById.get(key);
-          processedAnswers[key] = field
+        rowData[key] = field
             ? composeAnswerValue(field, value, sub.otherAnswers)
             : Array.isArray(value)
-              ? value.join(' - ')
-              : value;
-        }
-        Object.assign(rowData, processedAnswers);
+                ? value.join(' - ')
+                : value;
       }
-      
-      worksheet.addRow(rowData);
-    });
+    }
 
-    // 5. Download
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=responses_${formId}.xlsx`);
-    await workbook.xlsx.write(res);
-    res.status(200).end();
-
-  } catch (error) {
-    console.error("Excel Export Error:", error);
-    res.status(500).json({ message: error.message });
+    worksheet.addRow(rowData);
   }
+
+  // Download.
+  res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  );
+  res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=responses_${formId}.xlsx`
+  );
+
+  await workbook.xlsx.write(res);
+  res.end();
 });
 
 // @desc    Get single submission
@@ -523,94 +605,96 @@ const exportSubmissionsToExcel = catchAsync(async (req, res) => {
 // @access  Private
 const getUserSubmission = catchAsync(async (req, res) => {
   const { formid, userid } = req.params;
-  const submission = await Submission.findOne({ formId: formid, userId: userid });
+  if (
+    !mongoose.Types.ObjectId.isValid(formid) ||
+    !mongoose.Types.ObjectId.isValid(userid)
+  ) {
+    throw new AppError('Invalid submission lookup ID', 400);
+  }
+
+  const submission = await Submission.findOne({
+    formId: formid,
+    userId: userid,
+  });
+
   if (!submission) {
     throw new AppError('Submission not found', 404);
   }
+
   res.json(submission);
 });
 
-
-// // @desc    Get all submissions
-// // @route   GET /api/submission
-// // @access  Private (Admin)
+// @desc    Get all submissions
+// @route   GET /api/submission
+// @access  Private (Admin)
 const getSubmissions = catchAsync(async (req, res) => {
-
   const [result] = await Submission.aggregate([
     {
       $facet: {
-
         submissions: [
-          { $sort: { createdAt: -1 } }
+          { $sort: { createdAt: -1 } },
         ],
-
         totalCount: [
-          { $count: "count" }
+          { $count: 'count' },
         ],
-
-        // Attendance is the only state a submission has, so `attended` is what
-        // these counts are built from. The pending/approved/rejected facets that
-        // used to sit here matched on a `status` field nothing ever wrote.
         attendedCount: [
           { $match: { attended: true } },
-          { $count: "count" }
+          { $count: 'count' },
         ],
-
         notAttendedCount: [
           { $match: { attended: false } },
-          { $count: "count" }
+          { $count: 'count' },
         ],
-      }
-    }
+      },
+    },
   ]);
 
   const submissions = await Submission.populate(
-    result.submissions,
-    [
-      {
-        path: 'formID',
-        select: 'title type'
-      },
-      {
-        path: 'userID',
-        select: 'name email'
-      }
-    ]
+      result.submissions,
+      [
+        {
+          path: 'formId',
+          select: 'title type',
+        },
+        {
+          path: 'userId',
+          select: 'name email',
+        },
+      ]
   );
 
-  const totalCount = result.totalCount[0]?.count || 0;
-
-  const attendedCount = result.attendedCount[0]?.count || 0;
-
-  const notAttendedCount = result.notAttendedCount[0]?.count || 0;
-
   res.json({
-    totalCount,
-    attendedCount,
-    notAttendedCount,
-    submissions
+    totalCount: result.totalCount[0]?.count || 0,
+    attendedCount: result.attendedCount[0]?.count || 0,
+    notAttendedCount: result.notAttendedCount[0]?.count || 0,
+    submissions,
   });
 });
 
-
-// // @desc    Edit submission
-// // @route   PUT /api/submission/:id
-// // @access  Private (Admin)
+// @desc    Edit submission
+// @route   PUT /api/submission/:id
+// @access  Private (Admin)
 const editSubmission = catchAsync(async (req, res) => {
-
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new AppError('Invalid submission ID', 400);
+  }
   const submission = await Submission.findById(req.params.id);
 
   if (!submission) {
     throw new AppError('Submission not found', 404);
   }
 
-  const { answers } = req.body;
+  const { answers, otherAnswers } = req.body;
 
-  // `status` used to be accepted here. The field is gone from the schema, so
-  // writing it would have been a silent no-op at best; attendance is recorded
-  // only by `scanTicket`.
-  if (answers) {
-    submission.answers = answers;
+  if (answers !== undefined) {
+    submission.answers = parseObjectInput(answers, 'Answers');
+  }
+
+  if (otherAnswers !== undefined) {
+    submission.otherAnswers = parseObjectInput(
+        otherAnswers,
+        'otherAnswers'
+    );
   }
 
   await submission.save();
@@ -618,48 +702,77 @@ const editSubmission = catchAsync(async (req, res) => {
   res.json(submission);
 });
 
-
 const getSubmissionsForForm = catchAsync(async (req, res) => {
-    const { formId } = req.params;
-
-    // The page that lists these submissions has to know what kind of form it is
-    // looking at: only an `attendance` form has a ticket to scan, so only it
-    // shows an attendance column. That cannot come from `GET /form/:id`, which is
-    // the public, submitter-facing route and answers 400 for a closed or expired
-    // form - exactly the forms a committee comes here to review. This endpoint is
-    // already behind the admin guard, so it returns the few fields the page needs.
-    const form = await Form.findById(formId)
-      .select('title type fields')
-      .lean();
-
-    if (!form) {
-      throw new AppError('Form not found', 404);
-    }
-
-    const submissions = await Submission.find({ formId }).populate('userId', 'name email');
-
-    res.json({total : submissions.length, submissions, form});
-  });
-
-
-const downloadFile = catchAsync(async (req, res) => {
-  const { url } = req.query;
-  if (!url) throw new AppError('URL is required', 400);
-
-  const response = await fetch(decodeURIComponent(url), { redirect: 'follow' });
-  if (!response.ok) throw new AppError('File not found', 404);
-
-  const contentType = response.headers.get('content-type') || 'application/octet-stream';
-  const contentDisp = response.headers.get('content-disposition');
-
-  res.setHeader('Content-Type', contentType);
-  if (contentDisp) {
-    res.setHeader('Content-Disposition', contentDisp);
-  } else {
-    res.setHeader('Content-Disposition', 'attachment');
+  const { formId } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(formId)) {
+    throw new AppError('Invalid form ID', 400, 'INVALID_FORM_ID');
   }
 
+  // This endpoint must remain accessible for closed/expired forms.
+  // It is intended for administrative review.
+  const form = await Form.findById(formId)
+      .select('title type sections fields')
+      .lean();
+
+  if (!form) {
+    throw new AppError('Form not found', 404);
+  }
+  form.fields = getFormFields(form);
+
+  const submissions = await Submission.find({ formId })
+      .populate('userId', 'name email')
+      .sort({ createdAt: -1 });
+
+  res.json({
+    total: submissions.length,
+    submissions,
+    form,
+  });
+});
+
+// @desc    Download uploaded file
+// @route   GET /api/submissions/download?url=...
+// @access  Private
+const downloadFile = catchAsync(async (req, res) => {
+  const { url } = req.query;
+
+  if (!url || typeof url !== 'string') {
+    throw new AppError('URL is required', 400);
+  }
+
+  let parsedUrl;
+
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    throw new AppError('Invalid URL', 400);
+  }
+
+  // Only allow HTTPS Cloudinary-hosted files.
+  // This prevents arbitrary server-side URL fetching (SSRF).
+  if (
+      parsedUrl.protocol !== 'https:' ||
+      parsedUrl.hostname !== 'res.cloudinary.com'
+  ) {
+    throw new AppError('Unsupported file URL', 400);
+  }
+
+  const response = await fetch(parsedUrl.toString(), {
+    redirect: 'error',
+  });
+
+  if (!response.ok) {
+    throw new AppError('File not found', 404);
+  }
+
+  const contentType =
+      response.headers.get('content-type') || 'application/octet-stream';
+
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Disposition', 'attachment');
+
   const buffer = Buffer.from(await response.arrayBuffer());
+
   res.send(buffer);
 });
 
@@ -673,26 +786,3 @@ module.exports = {
   exportSubmissionsToExcel,
   downloadFile,
 };
-
-
-/*
-* Naming error during `populate` (in the `getSubmissions` function): You are attempting to call `populate` using uppercase formID and userID: `path: ‘formID’` and `path: ‘userID’`, whereas in the `SubmissionModel` schema, you named them in lowercase: `formId` and `userId`. This will cause the data retrieval to fail, and neither the form name nor the user name will be displayed.
-* Excel export error (exportSubmissionsToExcel function): You are using form.structure.forEach(...) to retrieve the questions and checking field.element. However, in the FormModel we created earlier, the field is named fields, not structure, and the type is registered under type, not element. Required fix: Change it to form.fields.forEach and use field.type.
-* The `attendedAt` field is disabled: In the `scanTicket` function, you are logging the attendance time: `submission.attendedAt = Date.now();`. However, in `submissionSchema`, the field `// attendedAt: Date` is commented out. You must enable it in the schema so that it is saved to the database.
-* Missing routes in submissionRouter.js: You’ve written two functions in the Controller—`getSubmission` (to retrieve a single submission) and `editSubmission` (to update a submission’s status)—but you completely forgot to add them to the Router file.
-* Generating tickets for everything (logically): The current code generates a ticketCode and a qrImage and sends a QR email for any form that is filled out (whether it’s an Event, a volunteer request, or a survey). You may need to add a condition to generate tickets only if `form.type` is related to an event (Event/Workshop).
-
-* RESOLVED in the current revision — see the numbered steps in `submitForm`:
-*   - Ticket/QR generation is now limited to `form.type === "attendance"`. The
-*     post-submission email is the form author's choice: with `sendEmailOnSubmission`
-*     on, their own subject/body is sent and an attendance form carries its QR inline;
-*     with it off, the neutral `submissionReceived.html` acknowledgement is sent as before.
-*   - The guest duplicate check used a hardcoded `'answers.email'` path. Field ids are
-*     generated from labels (see `FormModel`'s pre-save hook), so a field labelled
-*     "Email Address" is stored under `answers.email_address` and the old query never
-*     matched — guests could submit the same form repeatedly. It now queries
-*     `registrantEmail`, which is indexed.
-*   - Full Name and a valid Email are now enforced server-side, and a guest email that
-*     already owns an account is rejected with `EMAIL_HAS_ACCOUNT` (409) so the client
-*     can offer a log-in link.
-*/

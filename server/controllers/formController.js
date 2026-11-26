@@ -1,8 +1,19 @@
 const { catchAsync, AppError } = require('../middleware/errorsMiddleware');
+const mongoose = require('mongoose');
 const Form = require('../models/FormModel');
-const { deriveFieldIds, describeFieldIdProblems } = require('../utils/fieldId');
-const { assertIdentityFields } = require('../utils/fieldIdentity');
+const Submission = require('../models/SubmissionModel');
+const Activity = require('../models/ActivityModel');
+const {
+  assertIdentityFields,
+  assertIdentityOnEveryPath,
+  withFlatFormFields
+} = require('../utils/fieldIdentity');
+const {
+  resolveFormSections,
+  validateFormDocument
+} = require('../utils/formDefinition');
 const { renderCustomSubmissionEmail } = require('../utils/sendEmail');
+const { runWithOptionalTransaction } = require('../utils/runTransaction');
 const {
   SAMPLE_MEMBER,
   SAMPLE_NAME,
@@ -27,13 +38,6 @@ const EMAIL_BODY_MAX = 5000;
  *
  * @param {Array} fields
  */
-function assertUsableFieldIds(fields) {
-  const { emptyLabels, duplicates } = deriveFieldIds(fields);
-  if (emptyLabels.length === 0 && duplicates.length === 0) return;
-
-  throw new AppError(describeFieldIdProblems({ emptyLabels, duplicates }), 400, 'INVALID_FIELD_IDS');
-}
-
 /**
  * Read a boolean setting off a request body.
  *
@@ -125,13 +129,48 @@ function readSubmissionEmailSettings(body, existing = {}) {
   return out;
 }
 
+function validateFormDates(startDate, endDate) {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    throw new AppError('Invalid form dates', 400, 'INVALID_DATES');
+  }
+
+  if (start > end) {
+    throw new AppError(
+        'startDate must be before or equal to endDate',
+        400,
+        'INVALID_DATE_RANGE'
+    );
+  }
+
+  return { start, end };
+}
+
+function validateMaxSubmissions(value) {
+  if (value === undefined) return;
+
+  if (
+      typeof value !== 'number' ||
+      !Number.isInteger(value) ||
+      value < 1
+  ) {
+    throw new AppError(
+        'maxSubmissions must be a positive integer',
+        400,
+        'INVALID_MAX_SUBMISSIONS'
+    );
+  }
+}
+
 // @desc    Create a new form
 // @route   POST /api/forms
 // @access  Private (Admin)
 const createForm = catchAsync(async (req, res) => {
-  const { title, description, fields, type, startDate, endDate, maxSubmissions } = req.body;
+  const { title, description, sections, fields, type, startDate, endDate, maxSubmissions } = req.body;
 
-  if (!title || !type) {
+  if (typeof title !== 'string' || !title.trim() || !type) {
     throw new AppError("Title and Type are required", 400);
   }
 
@@ -147,72 +186,87 @@ const createForm = catchAsync(async (req, res) => {
     );
   }
 
-  // A form with no fields is never intentional and cannot be submitted
-  // (submitForm requires a name field), so say so rather than silently
-  // substituting a default. `fields` being absent entirely still falls back to
-  // the default below, which keeps older clients working.
-  if (fields !== undefined && (!Array.isArray(fields) || fields.length === 0)) {
-    throw new AppError("A form needs at least one field", 400, 'NO_FIELDS');
-  }
+  const resolvedSections = resolveFormSections({
+    sections,
+    fields,
+    defaultFields: [
+      { label: 'Full Name', type: 'TextInput', required: true },
+      { label: 'Email', type: 'TextInput', required: true }
+    ],
+    sectionTitle: 'Personal Information'
+  }, AppError);
 
-  // A form with no field list still has to be submittable, and submitForm needs a
-  // name and an email. This fallback used to be Full Name alone, which produced a
-  // form nobody could submit to.
-  const resolvedFields = fields || [
-    { label: "Full Name", type: "TextInput", required: true },
-    { label: "Email", type: "TextInput", required: true }
-  ];
-
-  assertUsableFieldIds(resolvedFields);
-
-  // A name and an email are not optional extras: submitForm rejects a submission
-  // without them, and the ticket QR, the confirmation email and the submissions
-  // export are all keyed on them. Catch it here so the builder gets told.
+  const resolvedFields = resolvedSections.flatMap(section => section.fields);
   assertIdentityFields(resolvedFields, AppError);
+  assertIdentityOnEveryPath(resolvedSections, AppError);
 
-  // `requiresLogin` decides who may submit, and is enforced in submitForm. It was
-  // never read from the request, so the flag was unreachable and always fell back
-  // to the schema default.
-  const requiresLogin = readBooleanSetting(req.body, 'requiresLogin', 'INVALID_REQUIRES_LOGIN', false);
+  // `requiresLogin` decides who may submit, and is enforced in submitForm.
+  const requiresLogin = readBooleanSetting(
+      req.body,
+      'requiresLogin',
+      'INVALID_REQUIRES_LOGIN',
+      false
+  );
 
   // Optional custom email to send after a submission. Same validation as the
   // edit path, so a form cannot be created in a state the editor would reject.
   const emailSettings = readSubmissionEmailSettings(req.body);
 
-  const defaultstartDate = new Date();
-  const defaultendDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // Default to 1 week from now
-  const form = await Form.create({
-    title,
+  validateMaxSubmissions(maxSubmissions);
+  const defaultStartDate = new Date();
+  const defaultEndDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const { start, end } = validateFormDates(
+      startDate || defaultStartDate,
+      endDate || defaultEndDate
+  );
+
+  const form = new Form({
+    title: title.trim(),
     description,
-    fields: resolvedFields,
+    sections: resolvedSections,
     type,
     requiresLogin,
     ...emailSettings,
-    startDate: startDate || defaultstartDate,
-    endDate: endDate || defaultendDate,
+    startDate: start,
+    endDate: end,
     maxSubmissions,
     createdBy: req.user._id
   });
 
+  await validateFormDocument(form, AppError);
+  await form.save();
   res.status(201).json(form);
 });
 
-// @desc    Get a single form by ID (Public view for students)
+// @desc    Get a single active form
 // @route   GET /api/form/:id
 // @access  Public
 const getForm = catchAsync(async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new AppError('Invalid form ID', 400, 'INVALID_FORM_ID');
+  }
+
   const form = await Form.findById(req.params.id);
 
-    if (!form) {
-      throw new AppError('Form not found', 404);
-    }
+  if (!form) {
+    throw new AppError('Form not found', 404);
+  }
 
-    // Check if form is Active
-    if (new Date(form.endDate).setHours(23,59,59,999) < new Date() || form.status !== "Active") {
-      throw new AppError('This form is currently closed.', 400);
-    }
+  const startDate = new Date(form.startDate);
+  const endDate = new Date(form.endDate);
+  endDate.setHours(23, 59, 59, 999);
 
-    res.json(form);
+  if (
+    Number.isNaN(startDate.getTime()) ||
+    Number.isNaN(endDate.getTime()) ||
+    endDate < new Date() ||
+    startDate > new Date() ||
+    form.status !== 'Active'
+  ) {
+    throw new AppError('This form is currently closed.', 400);
+  }
+
+  res.json(form);
 });
 
 // @desc    Get ALL forms (For Admin Dashboard Table)
@@ -220,8 +274,16 @@ const getForm = catchAsync(async (req, res) => {
 // @access  Private (Admin)
 const getForms = catchAsync(async (req, res) => {
   // Pagination
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 10;
+  const requestedPage = Number(req.query.page);
+  const requestedLimit = Number(req.query.limit);
+  const page = Number.isInteger(requestedPage) && requestedPage > 0
+    ? requestedPage
+    : 1;
+  const limit = Number.isInteger(requestedLimit) &&
+      requestedLimit > 0 &&
+      requestedLimit <= 100
+    ? requestedLimit
+    : 10;
   const skip = (page - 1) * limit;
 
   // Sort by newest first
@@ -256,7 +318,7 @@ const getForms = catchAsync(async (req, res) => {
     }
   ]);
 
-  const forms = result.forms;
+  const forms = result.forms.map(withFlatFormFields);
   const count = result.totalCount[0]?.count || 0;
   const draftCount = result.draftCount[0]?.count || 0;
   const closedCount = result.closedCount[0]?.count || 0;
@@ -281,23 +343,29 @@ const getForms = catchAsync(async (req, res) => {
 // @route   DELETE /api/forms/:id
 // @access  Private (Admin)
 const deleteForm = catchAsync(async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new AppError('Invalid form ID', 400, 'INVALID_FORM_ID');
+  }
+
   const form = await Form.findById(req.params.id);
+  if (!form) throw new AppError('Form not found', 404);
 
-    if (!form) {
-      throw new AppError('Form not found', 404);
-    }
-
-    // Optional: Check if the user is the one who created it OR is a super admin
-    // if (form.createdBy.toString() !== req.user._id.toString()) ...
-
-    await form.deleteOne();
-    res.json({ message: 'Form removed' });
+  await runWithOptionalTransaction(async session => {
+    const deletion = Submission.deleteMany({ formId: form._id });
+    if (session) deletion.session(session);
+    await deletion;
+    await form.deleteOne(session ? { session } : {});
+  });
+  res.json({ message: 'Form removed' });
 });
 
 // @desc    Toggle Form Status (Open/Close manually)
 // @route   PUT /api/forms/:id/toggle
 // @access  Private (Admin)
 const toggleFormStatus = catchAsync(async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    throw new AppError('Invalid form ID', 400, 'INVALID_FORM_ID');
+  }
   const form = await Form.findById(req.params.id);
     if (!form) throw new AppError('Form not found', 404);
 
@@ -319,7 +387,10 @@ const updateFormSettings = catchAsync(async (req, res) => {
   // email is only valid against the body already saved, and the date range has
   // to be checked against the dates that will actually result from the merge.
   // It also lets a missing form answer 404 instead of falling through.
-  const existing = await Form.findById(id).lean();
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw new AppError('Invalid form ID', 400, 'INVALID_FORM_ID');
+  }
+  const existing = await Form.findById(id).select('+submissionCount').lean();
   if (!existing) throw new AppError('Form not found', 404);
 
   const updateFields = {};
@@ -344,23 +415,82 @@ const updateFormSettings = catchAsync(async (req, res) => {
   // Compare the merged result, not just the two values that happen to be in this
   // request. Moving only endDate before the existing startDate used to slip
   // through and produce a form nobody can submit to.
-  const effectiveStart = new Date(updateFields.startDate ?? existing.startDate);
-  const effectiveEnd = new Date(updateFields.endDate ?? existing.endDate);
-  if (effectiveStart > effectiveEnd) {
-    throw new AppError('startDate must be before endDate', 400, 'INVALID_DATE_RANGE');
+  const { start, end } = validateFormDates(
+      updateFields.startDate ?? existing.startDate,
+      updateFields.endDate ?? existing.endDate
+  );
+  if (updateFields.startDate !== undefined) updateFields.startDate = start;
+  if (updateFields.endDate !== undefined) updateFields.endDate = end;
+  validateMaxSubmissions(updateFields.maxSubmissions);
+
+  if (updateFields.maxSubmissions !== undefined) {
+    const existingCount = await Submission.countDocuments({ formId: id });
+    updateFields.submissionCount = Math.max(
+        existingCount,
+        existing.submissionCount || 0
+    );
   }
 
-  const updatedForm = await Form.findByIdAndUpdate(
-    id,
-    { $set: updateFields },
-    { returnDocument: 'after', runValidators: true }
-  );
+  let updatedForm;
+  await runWithOptionalTransaction(async session => {
+      const sessionOptions = session ? { session } : {};
+      const { submissionCount, ...settings } = updateFields;
+      if (submissionCount !== undefined) {
+        await Form.updateOne(
+            { _id: id },
+            { $max: { submissionCount } },
+            sessionOptions
+        );
+      }
 
-  if (!updatedForm) throw new AppError('Form not found', 404);
+      const filter = { _id: id };
+      if (settings.maxSubmissions !== undefined) {
+        filter.$expr = {
+          $lte: [
+            { $ifNull: ['$submissionCount', 0] },
+            settings.maxSubmissions
+          ]
+        };
+      }
+
+      updatedForm = await Form.findOneAndUpdate(
+          filter,
+          { $set: settings },
+          { returnDocument: 'after', runValidators: true, ...sessionOptions }
+      );
+      if (!updatedForm) {
+        throw new AppError(
+            'maxSubmissions cannot be lower than the number of existing submissions.',
+            400,
+            'MAX_SUBMISSIONS_BELOW_CURRENT'
+        );
+      }
+
+      if (updatedForm.activityID) {
+        const activityUpdate = await Activity.updateOne(
+            { _id: updatedForm.activityID },
+            {
+              $set: {
+                startDate: updatedForm.startDate,
+                endDate: updatedForm.endDate,
+                title: updatedForm.title
+              }
+            },
+            { ...sessionOptions, runValidators: true }
+        );
+        if (!activityUpdate.matchedCount) {
+          throw new AppError(
+              'The activity associated with this form no longer exists.',
+              409,
+              'ACTIVITY_NOT_FOUND'
+          );
+        }
+      }
+  });
 
   res.status(200).json({
     message: 'Form settings updated successfully',
-    form: updatedForm
+    form: withFlatFormFields(updatedForm)
   });
 });
 
@@ -373,33 +503,102 @@ const updateFormSettings = catchAsync(async (req, res) => {
 // first and stays as literal text for the second, and an author cannot see that
 // difference any other way.
 const previewSubmissionEmail = catchAsync(async (req, res) => {
-  const { formTitle, formType, fields, asGuest, subject, messageBody } = req.body || {};
+  const {
+    formTitle,
+    formType,
+    sections,
+    fields,
+    asGuest,
+    subject,
+    messageBody
+  } = req.body || {};
 
   if (formTitle !== undefined && typeof formTitle !== 'string') {
     throw new AppError('formTitle must be text', 400, 'INVALID_FORM_TITLE');
   }
+
   if (formType !== undefined && typeof formType !== 'string') {
     throw new AppError('formType must be text', 400, 'INVALID_FORM_TYPE');
   }
+
   if (subject !== undefined && typeof subject !== 'string') {
     throw new AppError('subject must be text', 400, 'INVALID_EMAIL_SUBJECT');
   }
+
   if (messageBody !== undefined && typeof messageBody !== 'string') {
     throw new AppError('messageBody must be text', 400, 'INVALID_EMAIL_BODY');
+  }
+
+  // The preview now accepts sections instead of the former flat fields array.
+  if (sections !== undefined && !Array.isArray(sections)) {
+    throw new AppError('sections must be a list', 400, 'INVALID_SECTIONS');
   }
   if (fields !== undefined && !Array.isArray(fields)) {
     throw new AppError('fields must be a list', 400, 'INVALID_FIELDS');
   }
+  if (sections !== undefined && fields !== undefined) {
+    throw new AppError(
+        'Provide either sections or fields, not both',
+        400,
+        'AMBIGUOUS_FORM_DEFINITION'
+    );
+  }
+
+  // Validate the section structure before flattening it.
+  if (sections) {
+    for (const [index, section] of sections.entries()) {
+      if (!section || typeof section !== 'object' || Array.isArray(section)) {
+        throw new AppError(
+          `Section ${index + 1} must be an object`,
+          400,
+          'INVALID_SECTION'
+        );
+      }
+
+      if (!Array.isArray(section.fields)) {
+        throw new AppError(
+          `Section ${index + 1} must contain a fields array`,
+          400,
+          'INVALID_SECTION_FIELDS'
+        );
+      }
+
+      if (
+          section.fields.some(
+              field => !field || typeof field !== 'object' || Array.isArray(field)
+          )
+      ) {
+        throw new AppError(
+          `Section ${index + 1} contains an invalid field`,
+          400,
+          'INVALID_SECTION_FIELD'
+        );
+      }
+    }
+  }
+
+  if (
+    fields &&
+    fields.some(field => !field || typeof field !== 'object' || Array.isArray(field))
+  ) {
+    throw new AppError('fields contains an invalid field', 400, 'INVALID_FIELD');
+  }
 
   const title = (formTitle || '').trim() || 'Untitled form';
-  const safeFields = Array.isArray(fields) ? fields : [];
+
+  // The email preview utility still works with flat fields.
+  // Flatten the sections only for generating sample answers.
+  const safeFields = sections
+      ? sections.flatMap(section => section.fields)
+      : fields || [];
+
   const asMember = asGuest !== true;
 
-  // The QR is generated for real, from a sample code, so the author sees the
-  // actual block a ticket produces rather than a mocked rectangle. Only
-  // attendance forms ever carry one.
+  // Only attendance forms carry a QR code.
   const hasQr = formType === 'attendance';
-  const qrDataUrl = hasQr ? await QRCode.toDataURL(SAMPLE_TICKET_CODE) : null;
+  const qrDataUrl = hasQr
+      ? await QRCode.toDataURL(SAMPLE_TICKET_CODE)
+      : null;
 
   const dbSubmissions = buildSampleSubmissions(safeFields);
   dbSubmissions.formTitle = title;
@@ -412,58 +611,68 @@ const previewSubmissionEmail = catchAsync(async (req, res) => {
     userName: SAMPLE_NAME,
     ticketCode: SAMPLE_TICKET_CODE,
     qrDataUrl,
-    dbSubmissions,
+    dbSubmissions
   };
 
-  // The member case fills db-user[...]; the guest case passes no account, which
-  // is exactly what the controller does for an unregistered submitter.
-  // dbSubmissions carries the same reserved values the renderer merges in, so
-  // asking "would this resolve?" here gives the same answer the renderer does.
   const reportSubmissions = {
     ...dbSubmissions,
-    ...(qrDataUrl ? { qrurl: qrDataUrl, qrcode: qrDataUrl } : {}),
+    ...(qrDataUrl ? { qrurl: qrDataUrl, qrcode: qrDataUrl } : {})
   };
-  const memberContext = { dbUser: SAMPLE_MEMBER, dbSubmissions: reportSubmissions };
-  const guestContext = { dbUser: null, dbSubmissions: reportSubmissions };
 
-  const member = renderCustomSubmissionEmail({ ...base, dbUser: SAMPLE_MEMBER });
+  const memberContext = {
+    dbUser: SAMPLE_MEMBER,
+    dbSubmissions: reportSubmissions
+  };
+
+  const guestContext = {
+    dbUser: null,
+    dbSubmissions: reportSubmissions
+  };
+
+  const member = renderCustomSubmissionEmail({
+    ...base,
+    dbUser: SAMPLE_MEMBER
+  });
+
   const guest = asMember
-    ? member
-    : renderCustomSubmissionEmail({ ...base, dbUser: null });
+      ? member
+      : renderCustomSubmissionEmail({
+        ...base,
+        dbUser: null
+      });
 
   const subjectAndBody = `${base.subject}\n${base.messageBody}`;
 
-  // On a form with no QR the sender drops db-submissions[qrCode] rather than
-  // resolving it, so it is not an author mistake and is not reported as one.
-  const withoutStrippedQr = (list) =>
-    hasQr
-      ? list
-      : list.filter((p) => !['qrcode', 'qrurl'].includes(p.key.toLowerCase()));
+  // QR placeholders are not errors when the form doesn't generate a QR.
+  const withoutStrippedQr = list =>
+      hasQr
+          ? list
+          : list.filter(p => !['qrcode', 'qrurl'].includes(p.key.toLowerCase()));
 
   res.status(200).json({
     subject: asMember ? member.subject : guest.subject,
     member: member.html,
     guest: guest.html,
-    // For the member view, these are the placeholders a real member would also
-    // see as raw text: a misspelt name, or a field deleted after the message
-    // was written.
+
+    // Report unresolved placeholders for the member preview.
     unresolved: asMember
-      ? withoutStrippedQr(findUnresolved(subjectAndBody, memberContext)).map((p) => p.token)
-      : [],
-    // A guest cannot fill db-user[...] at all, so those are expected rather than
-    // a mistake. Only flag them so the UI can explain rather than alarm.
+        ? withoutStrippedQr(findUnresolved(subjectAndBody, memberContext))
+            .map(p => p.token)
+        : [],
+
+    // Guest db-user placeholders are expected because guests have no account.
     guestUnresolved: asMember
-      ? []
-      : withoutStrippedQr(findUnresolved(subjectAndBody, guestContext))
-          .filter((p) => p.scope === 'db-user')
-          .map((p) => p.token),
+        ? []
+        : withoutStrippedQr(findUnresolved(subjectAndBody, guestContext))
+            .filter(p => p.scope === 'db-user')
+            .map(p => p.token)
   });
 });
 
 module.exports = { 
   createForm, 
-  getForm, 
-  getForms, 
+  getForm,
+  getForms,
   deleteForm,
   toggleFormStatus,
   updateFormSettings,
